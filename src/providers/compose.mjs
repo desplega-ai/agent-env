@@ -157,6 +157,41 @@ function remoteContext(source) {
 }
 // The normalized model stays private. The source files remain unchanged.
 export class ComposeProvider extends DockerProvider {
+  snapshotVolumeNames(spec, manifest) {
+    return Object.fromEntries(manifest.volumes.map(volume => {
+      const names = volume.mounts.map(mount => {
+        const service = spec.compose.model.services[spec.services[mount.service]?.composeService];
+        const source = service?.volumes?.find(item => item.type === 'volume' && item.target === mount.target)?.source;
+        const definition = spec.compose.model.volumes?.[source];
+        if (!source || !definition || definition.external) throw new Error(`Snapshot mount ${mount.service}:${mount.target} requires a managed destination volume.`);
+        return `${this.prefix(spec)}-${source}`;
+      });
+      if (new Set(names).size !== 1) throw new Error('Preserve shared volume mounts when restoring a Compose snapshot.');
+      return [volume.id, names[0]];
+    }));
+  }
+  snapshotVolumeLabels(spec, name) {
+    const source = Object.keys(spec.compose.model.volumes ?? {}).find(key => `${this.prefix(spec)}-${key}` === name);
+    if (!source) throw new Error('The destination volume does not match this Compose project.');
+    return { 'com.docker.compose.project': this.prefix(spec), 'com.docker.compose.volume': source };
+  }
+  relocate(spec, cwd) {
+    const result = structuredClone(spec);
+    const remap = path => typeof path === 'string' && (path === spec.cwd || path.startsWith(`${spec.cwd}${sep}`)) ? cwd + path.slice(spec.cwd.length) : path;
+    result.cwd = cwd;
+    result.envFiles = result.envFiles?.map(remap);
+    result.compose.files = result.compose.files.map(remap);
+    for (const service of Object.values(result.compose.model.services)) {
+      for (const volume of service.volumes ?? []) if (volume.type === 'bind') volume.source = remap(volume.source);
+      if (service.build) {
+        service.build.context = remap(service.build.context);
+        service.build.dockerfile = remap(service.build.dockerfile);
+        for (const [key, path] of Object.entries(service.build.additional_contexts ?? {})) service.build.additional_contexts[key] = remap(path);
+      }
+    }
+    for (const kind of ['configs', 'secrets']) for (const resource of Object.values(result.compose.model[kind] ?? {})) resource.file = remap(resource.file);
+    return result;
+  }
   async docker(spec, args, options) {
     try { return await super.docker(spec, args, options); }
     catch (error) { throw Object.assign(new Error('Docker operation failed. Check Docker access and service status.'), { exitCode: error.exitCode ?? 1 }); }
@@ -292,7 +327,8 @@ export class ComposeProvider extends DockerProvider {
         await this.command(spec, ['mkdir', '-p', remoteDirectory]);
         await this.command(spec, ['chmod', '700', remoteDirectory]);
         for (const asset of [...prepared.assets, { local: prepared.localFile, remote: handle.runtimeFile }]) {
-          await run('rsync', ['-az', '--chmod=F600', '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), asset.local, `${spec.host}:${quote(asset.remote)}`]);
+          await run('rsync', ['-az', '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), asset.local, `${spec.host}:${quote(asset.remote)}`]);
+          await this.command(spec, ['chmod', '600', asset.remote]);
         }
       }
       attempted = true;

@@ -28,7 +28,7 @@ export class DockerProvider {
     const { spec, workspace } = handle;
     if (!spec.host) return;
     await this.command(spec, ['mkdir', '-p', workspace]);
-    await run('rsync', ['-az', '--delete', '--exclude=.git', '--exclude=node_modules', '--exclude=.dev-now', '--exclude=.env', '--exclude=.env.*', '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), `${spec.cwd}/`, `${spec.host}:${quote(`${workspace}/`)}`]);
+    await run('rsync', ['-az', '--delete', '--exclude=.git', '--exclude=node_modules', '--exclude=.dev-now', '--exclude=.env', '--exclude=.env.*', '--exclude=.next', '--exclude=dist', '--exclude=build', '--exclude=coverage', '--exclude=.cache', '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), `${spec.cwd}/`, `${spec.host}:${quote(`${workspace}/`)}`]);
   }
   async create(spec) {
     await this.docker(spec, ['info', '--format', '{{.ServerVersion}}']);

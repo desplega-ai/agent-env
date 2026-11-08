@@ -240,8 +240,13 @@ export function createCloudManager({
         let server = await createResource(record, 'server', ['--type', options.type, '--location', options.location, '--image', options.image,
           '--ssh-key', String(key.id), '--primary-ipv4', String(ip.id), '--without-ipv6', '--user-data-from-file', join(dir, 'cloud-init.yaml')]);
         if (server.public_net?.ipv4?.id !== ip.id) throw new Error('Cloud server IP does not match the ownership record.');
-        if (server.status === 'off') {
-          await hcloud('server', 'poweron', [String(server.id)]);
+        for (let attempt = 0; server?.status === 'off' && attempt < 3; attempt++) {
+          try { await hcloud('server', 'poweron', [String(server.id)]); }
+          catch (error) {
+            server = await reconcile(record, 'server');
+            if (!server || !['off', 'running', 'starting'].includes(server.status) || (server.status === 'off' && attempt === 2)) throw error;
+            if (server.status === 'off') await delay(1000 * (attempt + 1));
+          }
           server = await reconcile(record, 'server');
         }
         if (!server || !['running', 'starting'].includes(server.status)) throw new Error('Cloud server cannot start from its current state.');

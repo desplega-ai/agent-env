@@ -1,5 +1,7 @@
 import { DockerProvider } from './docker.mjs';
-const providers = new Map([['docker', new DockerProvider()]]);
+import { SandboxProvider } from './sandbox.mjs';
+import { ComposeProvider } from './compose.mjs';
+const providers = new Map([['docker', new DockerProvider()], ['compose', new ComposeProvider()], ['sandbox', new SandboxProvider()]]);
 export function providerFor(spec) {
   const provider = providers.get(spec.provider);
   if (!provider) throw new Error(`Provider ${spec.provider} is not installed. Available providers: ${[...providers.keys()].join(', ')}.`);

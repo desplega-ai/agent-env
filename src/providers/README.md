@@ -25,7 +25,8 @@ Register an implementation in `index.mjs`. A provider receives a validated speci
 ```
 
 The returned handle must be JSON serializable. It contains `spec` and `services`.
-Each service includes its public `port` and `protocol`.
+Each published service includes its public `port` and `protocol`.
+Compose internal services use `internal: true` and omit routing fields.
 The provider can add container IDs, workspace paths, published ports, or VM IDs.
 Runtime connections stay outside the persisted handle.
 
@@ -56,5 +57,6 @@ Split transport implementations only when another provider needs them.
 A Firecracker implementation can return the same local connection contract through SSH or a VM network.
 Its host must support KVM. Its service image format can differ, but it must retain the public service contract.
 
-Future backup storage belongs behind a separate interface for export, import, list, and deletion.
-S3 is one possible implementation. An object store is not a substitute for a database's active block storage.
+The snapshot module exports and restores verified archives locally or through S3.
+Compose supplies `snapshotVolumeNames` and `snapshotVolumeLabels` to map restored volumes.
+The daemon coordinates Compose forks through these snapshot hooks. An object store is not a substitute for a database's active block storage.

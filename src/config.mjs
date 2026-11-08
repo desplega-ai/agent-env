@@ -58,6 +58,7 @@ export async function loadSpec(options = {}, command = []) {
   let config = {};
   try { config = JSON.parse(await readFile(resolve(cwd, options.config ?? 'dev-now.json'), 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT' || options.config) throw error; }
+  if (options.provider) config.provider = options.provider;
   const names = stringList(options.env, 'env');
   if (names.length > 1) throw new Error('Select one named environment per instance.');
   const environment = names[0] ?? 'default';
@@ -68,7 +69,7 @@ export async function loadSpec(options = {}, command = []) {
   const configuredName = environmentName ?? (config.name ? environment === 'default' ? config.name : `${config.name.slice(0, 39)}${suffix}` : undefined);
   const spec = { ...config, cwd, environment, name: options.name ?? configuredName ?? `dev-${base}-${hash(cwd)}${suffix}`, provider: config.provider ?? 'docker' };
   if (options.ssh) spec.host = options.ssh;
-  if (options.local) delete spec.host;
+  if (options.local) { delete spec.host; delete spec.cloud; delete spec.sshConfig; }
   if (options['ssh-config']) spec.sshConfig = resolve(cwd, options['ssh-config']);
   spec.envFiles = stringList(options['env-file'] ?? config.envFiles ?? config.envFile, 'env-file').map(file => resolve(cwd, file));
   // These values remain in memory and private daemon state. Initialization never writes them.

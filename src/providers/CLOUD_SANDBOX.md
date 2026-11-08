@@ -1,8 +1,7 @@
 # Owned cloud hosts and sandbox adapters
 
-These modules do not register providers or change the CLI.
-The parent must register `new SandboxProvider()` under `sandbox`.
-The parent owns scheduling, instance state, and service startup.
+The provider registry includes `SandboxProvider` under `sandbox`.
+The daemon owns scheduling, instance state, and service startup.
 
 ## Cloud integration
 
@@ -133,7 +132,7 @@ Cloud-init installs Docker Engine, the current Compose plugin, Buildx, and rsync
 The bootstrap supports Ubuntu and Debian images with cloud-init and systemd.
 A custom image must meet those requirements.
 Type, location, and image availability depend on the authenticated Hetzner project.
-The parent must validate actual availability during its live test.
+Live provisioning passed with CX23 in hel1. Availability remains specific to the account and location.
 
 The module generates a dedicated host key before provisioning.
 Cloud-init installs that key, and a private `known_hosts` file pins its public key.
@@ -234,4 +233,4 @@ They never call the live Hetzner API.
 Sandbox tests import a local ESM module and test the real Docker provider with a simulated Docker CLI runner.
 They use a real loopback listener for service readiness.
 They allocate no live containers or cloud infrastructure.
-The parent must test live provisioning and provider registration separately.
+Live provisioning and the registered Docker sandbox bridge passed integration tests. See VERIFICATION.md.

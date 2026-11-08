@@ -2,65 +2,125 @@
 
 # dev-now
 
-Run development stacks locally or on an SSH host. Open either at a stable localhost address.
+Run a development stack locally, over SSH, or on an on-demand Hetzner machine. Open each instance through localhost.
 
-A dependency-free Node CLI inspired by [Tesser](https://tesser.sh/docs/reference/localhost).
-Docker supplies isolated containers, networks, persistent volumes, and image caching.
-A local daemon routes HTTP, WebSockets, and TCP through loopback addresses.
+The CLI uses Node 22+, Docker, and a local routing daemon. It has no npm dependencies.
+[Tesser](https://tesser.sh/) inspired the workflow. [Portless](https://github.com/vercel-labs/portless) informed the shared HTTPS proxy and local certificate authority.
 
-Requires Node 22+. Local stacks require Docker. SSH operation requires local `ssh` and `rsync`. Remote hosts need Docker, SSH, rsync, Bash, and `timeout`.
-macOS and Linux are supported. The remote user must have permission to use Docker.
-
-## Try it
-
-From this checkout:
+## Start
 
 ```sh
 npm link --ignore-scripts --no-audit --no-fund
+cd /path/to/project
+dev-now init
+dev-now up --name app --https
+dev-now ui
+```
+
+`init` detects Compose files, package scripts, package managers, and common framework ports.
+It never replaces an existing configuration or edits package scripts.
+For an unknown project, supply a command:
+
+```sh
+dev-now init --port 3000 --image node:22-bookworm-slim -- node server.js
+```
+
+For the included example:
+
+```sh
 cd examples/hello
 dev-now up --name demo
 ```
 
-Open `http://demo.localhost:3300` or `http://localhost:3300`.
-The example also starts Postgres at `localhost:55432`, with database `app`, user `postgres`, and password `dev-only`.
-These credentials are for the example only.
+Open `http://demo.localhost:3300`. The example also provides Postgres on `localhost:55432` with development-only credentials.
 
-Run the same stack remotely:
+## Local and remote
 
 ```sh
+dev-now up --name local --local
 dev-now up --name remote --ssh user@server
 dev-now use remote
 ```
 
-Open `http://remote.localhost:3300`. `localhost:3300` now selects the remote instance.
-The local instance remains accessible at `http://demo.localhost:3300`.
+Both instances retain named addresses, such as `local.localhost:3000` and `remote.localhost:3000`.
+`use` selects the instance behind bare `localhost:3000` and raw TCP ports.
+A selection change closes existing connections that used bare localhost. Named HTTP connections remain separate.
 
-An SSH alias can supply the user, key, and port. The CLI reuses SSH connections within its own state directory.
-Use `--ssh-config /path/to/config` for a separate SSH configuration.
-Complete SSH host verification before the first command. The CLI does not request passwords.
+SSH targets need Docker, rsync, Bash, and `timeout`. The local machine needs SSH and rsync.
+Use an SSH alias or `--ssh-config FILE` for keys and ports. Existing SSH hosts require verified host keys.
 
-## Your project
+Remote source synchronization starts automatically and follows file edits. Use `--no-watch` for manual synchronization.
+`dev-now sync remote` synchronizes immediately. The daemon reconnects failed SSH tunnels with bounded retry intervals.
+Synchronization excludes Git metadata, dependencies, common build directories, `.dev-now`, and `.env*` files.
+Keep other credentials outside the source tree. Explicit Compose secret files use a separate private transfer.
+
+## Compose
+
+Existing `compose.yaml`, `compose.yml`, and `docker-compose.*` files work directly, without `init`.
 
 ```sh
-cd /path/to/project
-dev-now init
-# Edit dev-now.json to select your image and command.
+dev-now up --name app --profile tools
+dev-now up --name remote --compose-file compose.yaml --compose-file compose.dev.yaml --ssh my-host
+```
+
+The provider preserves builds, dependencies, health checks, profiles, networks, and named volumes.
+Each instance receives isolated names and loopback backend ports. Original Compose files remain unchanged.
+Internal services remain internal. External volumes and networks survive removal and purge.
+
+Multiple published ports on one service require explicit aliases in `compose.routes`.
+UDP, replicas, host namespaces, custom network allocation, and some deployment features return explicit unsupported-feature errors.
+Remote bind and build paths must remain inside the checkout.
+See the [Compose example and contract](examples/compose/README.md).
+
+## Environments and secrets
+
+```sh
+dev-now env set POSTGRES_PASSWORD --from-env MY_DATABASE_PASSWORD
+# Or: dev-now env set POSTGRES_PASSWORD < /path/to/private/password-file
+dev-now env list
+dev-now env unset POSTGRES_PASSWORD
+```
+
+Secret commands accept `--env NAME`. Values stay in a private store outside the checkout.
+The CLI prints secret names only. Logs and execution output redact resolved environment values.
+
+```json
+{
+  "provider": "compose",
+  "compose": { "files": ["compose.yaml"] },
+  "environments": {
+    "review": {
+      "envFiles": [".env.review"],
+      "env": { "POSTGRES_PASSWORD": { "secret": "POSTGRES_PASSWORD" } },
+      "compose": { "profiles": ["tools"] }
+    }
+  }
+}
+```
+
+```sh
+dev-now env set POSTGRES_PASSWORD --env review --from-env MY_DATABASE_PASSWORD
+dev-now up --env review --name review
+```
+
+Values can be strings, `{ "secret": "KEY" }`, or `{ "env": "SHELL_VARIABLE" }`.
+Repeated `--env-file FILE` options select explicit environment files.
+Native Docker environment files contain literal values. Compose retains its own interpolation rules.
+Compose container variables still follow each service's `environment` configuration.
+
+## Services and caching
+
+```sh
+dev-now add postgres
+dev-now add redis
 dev-now up
 ```
 
-Without an explicit name, the CLI derives a name from the checkout path.
-Separate Git worktrees therefore receive separate instances.
-Each instance has its own network, database volumes, and dependency caches.
+Postgres defaults to public port 55432. Redis defaults to 56379. Use `--port` to select another port.
+Both services retain data in named volumes. Postgres receives a generated password in the private environment store.
+Compose projects receive a separate `dev-now.addons.json` override.
 
-For one command without a configuration file:
-
-```sh
-dev-now up --name api --port 3000 --image node:22-bookworm-slim -- node server.js
-```
-
-The process must listen on `0.0.0.0`, not container loopback.
-The CLI sets `HOST=0.0.0.0` and `PORT` to the container port.
-Your program must honor these values or configure its listener directly.
+Native Docker projects use this format:
 
 ```json
 {
@@ -68,116 +128,131 @@ Your program must honor these values or configure its listener directly.
     "web": {
       "image": "node:22-bookworm-slim",
       "port": 3000,
-      "command": "npm install && npm run dev",
-      "env": { "DATABASE_URL": "postgres://postgres:dev-only@db:5432/app" },
-      "volumes": {
-        "dependencies": "/workspace/node_modules",
-        "cache": "/root/.npm"
-      }
-    },
-    "db": {
-      "image": "postgres:16-alpine",
-      "port": 5432,
-      "protocol": "tcp",
-      "health": "pg_isready -U postgres",
-      "env": { "POSTGRES_PASSWORD": "dev-only", "POSTGRES_DB": "app" },
-      "volumes": { "data": "/var/lib/postgresql/data" }
+      "command": "npm ci && npm run dev -- --host 0.0.0.0",
+      "volumes": { "dependencies": "/workspace/node_modules", "cache": "/root/.npm" }
     }
   }
 }
 ```
 
-`containerPort` defaults to `port`. Use it when the public and container ports differ.
-Services reach each other by service name, such as `db:5432`, on the instance network.
-Services start before readiness checks. Applications should retry connections while dependencies start.
-`health` adds an optional command inside the container. HTTP services must also return an HTTP response.
-TCP services receive a connection check unless you supply `health`.
+The checkout appears at `/workspace`. `containerPort` defaults to `port`.
+Processes must listen on `0.0.0.0`. The runtime sets `HOST` and `PORT` for native Docker services.
+Services reach each other by service name on the instance network.
+Named volumes retain dependencies and package caches. Docker retains build and image caches.
 
-Images provide their own runtimes. For Bun, select a Bun image and its cache path.
-Named volumes preserve installed dependencies and package caches across restarts.
-Images remain in Docker's image cache. The CLI never prunes shared caches.
+## Hetzner
 
-## Commands
+Authenticate the installed `hcloud` CLI, then run:
+
+```sh
+dev-now up --name cloud --cloud hetzner --location hel1
+dev-now down cloud
+dev-now up --name cloud --cloud hetzner --location hel1
+dev-now rm cloud --purge
+```
+
+The CLI provisions Docker and Compose, generates dedicated SSH credentials, and pins the host identity before connecting.
+Ownership records and labels protect unrelated machines, keys, and IP addresses.
+`down` stops containers and powers off an otherwise unused owned machine. Its disk remains available for resume.
+Powered-off Hetzner machines still incur charges. `rm --purge` deletes the last instance's owned machine, IP, key, and data.
+A plain `rm` retains the cloud record so `list`, resume, and later purge remain available.
+Forks share their source machine. Removing one fork preserves other instances on that machine.
+
+The default idle timeout is 30 minutes. Use `--idle-minutes 0` to disable it.
+HTTP requests, WebSocket traffic, TCP traffic, source synchronization, and explicit service commands record activity.
+Use `--ttl-hours N` for an explicit destructive expiry.
+**Idle shutdown and expiry require the local daemon to remain running and connected.** They are not cloud-side schedules.
+Keep the same `hcloud` context for a machine's lifecycle.
+
+## Forks and snapshots
+
+Stop the source before copying database volumes:
+
+```sh
+dev-now down app
+dev-now fork app experiment --worktree ../experiment --branch experiment
+```
+
+This creates a Git worktree, copies current source changes, copies volumes, and starts the fork.
+Credentials and generated files are excluded from copied changes. The source remains unchanged.
+Without `--worktree`, `--branch`, or `--ref`, `fork` copies data and uses the existing source checkout.
+Forks require a new destination name and run on the source Docker host.
+
+```sh
+dev-now snapshot app /existing/backups/checkpoint
+dev-now restore /existing/backups/checkpoint --name restored
+
+dev-now snapshot app s3://my-bucket/checkpoint
+dev-now restore s3://my-bucket/checkpoint --name restored --ssh my-host
+```
+
+Restore uses the current project's configuration and creates fresh volumes before starting services.
+It verifies archive hashes and extraction paths. It refuses existing destination volumes.
+Snapshots contain named volume data. Source files require Git or another backup procedure.
+Unsupported or shared mounts cause an error. `--omit-mounts` explicitly excludes them and reports each omission.
+
+S3 uses the installed AWS CLI and its normal credentials. `--endpoint URL` selects compatible storage.
+Each snapshot needs a new prefix. Conditional writes prevent overwrites, and the manifest uploads last.
+A failed upload can leave partial objects for manual inspection. Export uses single-object uploads, limited to 5 GB per volume on AWS S3.
+Archives require temporary local disk space. S3 stores backups, while running databases use Docker volumes.
+See [snapshot format and worktree ownership](docs/snapshots-and-worktrees.md).
+
+## HTTPS and status UI
+
+```sh
+dev-now https --https-port 8443
+dev-now trust
+dev-now ui --port 4780
+```
+
+HTTPS uses a private local CA and one loopback proxy. HTTP/2, HTTP/1.1, and WebSocket upgrades are supported.
+The primary HTTP service uses `https://app.localhost:8443`.
+Other HTTP services use `https://app--SERVICE.localhost:8443`.
+`up --https` enables the proxy during startup.
+
+`trust` explicitly installs the CA in the macOS user keychain or a Debian-based Linux trust store.
+Linux trust installation requires sudo permission. Some browsers and runtimes maintain separate trust stores.
+For curl without OS trust installation:
+
+```sh
+curl --cacert ~/.local/state/dev-now/tls/ca.pem \
+  --resolve app.localhost:8443:127.0.0.1 https://app.localhost:8443/
+```
+
+The dashboard displays instances, service health, addresses, synchronization state, and redacted logs.
+Automatic refresh is optional and persists in browser storage. The dashboard accepts local read-only requests.
+Application pages contain no injected browser controls.
+
+## Lifecycle and provider boundaries
 
 ```sh
 dev-now list
-dev-now use demo
-dev-now logs demo --service web
-dev-now exec demo --service db -- psql -U postgres -d app -c 'select 1'
-dev-now sync remote
-dev-now down demo
-dev-now fork demo experiment
-dev-now rm experiment --purge
-dev-now down --all
+dev-now logs app --service web
+dev-now exec app --service postgres -- psql -U postgres -d app -c 'select 1'
+dev-now down app
+dev-now rm app --purge
 dev-now daemon stop
 ```
 
-`up` starts or resumes a stack and waits for readiness.
-The first instance on a port becomes its default. Use `use NAME` to change that selection.
-A repeated `up` preserves the selection and restores SSH connections.
-A configuration change requires `rm NAME`, then `up`. The default `rm` retains volumes.
+`down` retains containers and data. `rm` removes containers and retains volumes. `rm --purge` also removes managed volumes.
+For a removed local instance, recreate it with `up` before purging its retained volumes.
+Configuration changes require `rm`, then `up`.
+`daemon stop` stops routing, synchronization, and lifecycle timers. Containers remain running.
+The next command restores saved routing and enabled UI/HTTPS listeners.
 
-`down` stops containers and retains their data. `rm` removes containers and networks.
-`rm --purge` also deletes that instance's volumes.
-After a plain `rm`, recreate the instance with `up` before using `rm --purge` to delete its retained volumes. `--all` applies to all registered instances in this CLI's state directory.
-`daemon stop` stops local routing and SSH tunnels. It leaves containers running.
-The next command starts routing again and restores saved selections.
+Worktrees remain after instance removal by default.
+`rm NAME --remove-worktree` removes an owned clean worktree.
+Add `--discard-worktree` only when you intend to discard its changed and ignored files.
 
-`fork` requires a stopped source. It copies volumes and starts an independent instance on the same Docker host.
-It refuses destination volumes that already exist. Database writes in the fork do not affect the source.
-Forks copy data, not Git branches. Local forks share the source checkout unless you create a separate worktree.
-Remote forks synchronize the current local checkout into a separate directory.
-Forking copies all volume contents. It is not an instant snapshot.
+State defaults to `~/.local/state/dev-now`. `DEV_NOW_HOME` selects an isolated private state directory.
+State can contain environment values. Back up cloud ownership records and credentials before moving it.
+All application ports bind loopback. Remote traffic travels through SSH.
 
-Local source files use a bind mount. Remote files use explicit `rsync` synchronization before `up`, or through `sync NAME`.
-Remote sync excludes `.git`, `node_modules`, `.dev-now`, `.env`, and `.env.*` at every depth.
-Other files, including other ignored files, can synchronize. Do not keep credentials in the source directory.
-There is no continuous file watcher yet. Run `sync` after edits to remote code.
-
-## Routing and limits
-
-HTTP instances share the same public port through `NAME.localhost` hostnames.
-Requests to bare localhost select the active instance.
-Requests from a named instance to bare localhost use the page's `Origin` or `Referer` when that instance serves the port.
-WebSocket upgrades, request bodies, cookies, and streaming responses pass through the proxy.
-The backend receives `Host: localhost:<public-port>` and the original host in `X-Forwarded-Host`.
-Prefer host-only cookies. Applications with fixed callback URLs or cookie domains may need configuration.
-
-TCP has no HTTP hostname. Postgres and Redis connections use the instance selected by `use`.
-Changing the selection closes connections that used bare localhost. Named HTTP connections remain independent.
-Reload existing pages after a switch. There is no injected browser panel.
-
-All published ports bind loopback on both machines. SSH carries remote traffic.
-The proxy rejects unrelated HTTP hostnames. The control API uses a private Unix socket.
-No root permissions, DNS changes, or `/etc/hosts` entries are required.
-Browsers normally resolve `*.localhost` to loopback. A CLI client without that behavior can use:
-
-```sh
-curl --resolve demo.localhost:3300:127.0.0.1 http://demo.localhost:3300
-```
-
-The state directory defaults to `~/.local/state/dev-now`. Set `DEV_NOW_HOME` to isolate another daemon.
-State can contain configured environment values. The directory and state file use private permissions.
-Remote removal also deletes its synchronized source directory.
-A lost SSH tunnel appears as disconnected. Run the original `up` command to reconnect.
-Automatic tunnel reconnection, HTTPS, cloud provisioning, and multi-user sharing are outside this version.
-
-## Providers, Firecracker, and S3
-
-The CLI and routing daemon call a [provider interface](src/providers/README.md).
-The Docker provider supports local execution and SSH execution through the same lifecycle.
-Adding a provider does not require replacing HTTP routing or CLI commands.
-
-A Firecracker provider is a suitable later addition for stronger isolation and VM snapshots.
-It requires a Linux host with access to `/dev/kvm`, a guest kernel, a root filesystem, and network configuration.
-It cannot run natively on this Mac. A normal VPS must expose nested virtualization to support it.
-See the [Firecracker requirements](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md).
-
-Persistence currently uses [Docker volumes](https://docs.docker.com/engine/storage/volumes/) on the selected host.
-Deleting that host loses those volumes. S3 backups and restores are not implemented.
-A future storage adapter should export consistent stopped-volume archives or database-native backups to S3.
-It should restore those backups onto local block storage before a service starts.
-S3 should not act as the live filesystem for Postgres.
+The [sandbox adapter contract](src/providers/CLOUD_SANDBOX.md) accepts trusted local ESM adapters with explicit capabilities.
+Use `--provider sandbox --adapter docker` for the included bridge.
+No hosted sandbox vendor or Firecracker runtime is bundled. Those require separate adapters.
+Firecracker requires a Linux host with KVM access, a guest kernel, root filesystem, and guest networking.
+See [Firecracker's host requirements](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md).
 
 ## Verification
 
@@ -185,11 +260,10 @@ S3 should not act as the live filesystem for Postgres.
 npm run check
 npm test
 npm run test:e2e
-DEV_NOW_TEST_SSH=user@server npm run test:e2e
-# Optional: DEV_NOW_TEST_SSH_CONFIG=/path/to/ssh-config
+npm run test:runtime
+npm run test:features
+DEV_NOW_TEST_SSH=my-host DEV_NOW_TEST_SSH_CONFIG=/path/to/config npm run test:features
 ```
 
-The end-to-end test creates real web and Postgres containers.
-It checks HTTP routing, TCP forwarding, isolated data, persistence, sync, daemon recovery, and safe forks.
-It removes its containers, volumes, daemon, and local temporary files afterward.
-It does not provision or delete the SSH host.
+Tests create isolated resources and remove them afterward. SSH tests use an existing host without provisioning or deleting it.
+See [verification evidence](VERIFICATION.md) for completed local, remote, S3, cloud, and UI checks.

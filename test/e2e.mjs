@@ -11,11 +11,11 @@ const state = join(directory, '.dev-now');
 const webPort = await freePort(), dbPort = await freePort();
 const remote = process.env.DEV_NOW_TEST_SSH;
 const sshConfig = process.env.DEV_NOW_TEST_SSH_CONFIG;
-const options = remote ? ['--ssh', remote, ...(sshConfig ? ['--ssh-config', sshConfig] : [])] : [];
+const options = [...(remote ? ['--ssh', remote, ...(sshConfig ? ['--ssh-config', sshConfig] : [])] : []), '--no-watch'];
 const config = {
   services: {
     web: { image: 'busybox:1.37', port: webPort, containerPort: 3000, command: 'httpd -f -p 3000 -h /workspace', volumes: { data: '/data' } },
-    db: { image: 'postgres:16-alpine', port: dbPort, containerPort: 5432, protocol: 'tcp', health: 'pg_isready -U postgres', env: { POSTGRES_PASSWORD: 'test-only', POSTGRES_DB: 'app' }, volumes: { data: '/var/lib/postgresql/data' } },
+    db: { image: 'postgres:16-alpine', port: dbPort, containerPort: 5432, protocol: 'tcp', health: 'pg_isready -h 127.0.0.1 -U postgres', env: { POSTGRES_PASSWORD: 'test-only', POSTGRES_DB: 'app' }, volumes: { data: '/var/lib/postgresql/data' } },
   },
 };
 await writeFile(join(directory, 'dev-now.json'), JSON.stringify(config));

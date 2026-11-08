@@ -1,11 +1,16 @@
 import http from 'node:http';
-import { readFile, writeFile, rename, mkdir, chmod } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, chmod, mkdtemp, rm } from 'node:fs/promises';
 import { once } from 'node:events';
+import { join } from 'node:path';
+import { snapshotInstance, restoreSnapshot, disposeRestoredVolumes } from './snapshots.mjs';
+import { createWorktree, removeOwnedWorktree } from './worktrees.mjs';
 import { hostname } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { home, socketPath, statePath } from './paths.mjs';
 import { hash, validName, validate } from './config.mjs';
 import { providerFor, disposeProviders } from './providers/index.mjs';
+import { RuntimeExtras, redact } from './runtime.mjs';
+import { prepareCloud, sleepCloud, destroyCloud, commitCloud, disposeFailedCloud } from './cloud.mjs';
 import { createProxy, createTcpProxy } from './proxy.mjs';
 
 await mkdir(home, { recursive: true, mode: 0o700 });
@@ -16,13 +21,37 @@ catch (error) { if (error.code !== 'ENOENT') throw error; state = { instances: {
 const routes = new Map();
 const connections = new Map();
 const errors = new Map();
-const owner = hash(`${hostname()}:${home}`);
+const owner = state.owner ?? hash(`${hostname()}:${home}`);
+state.owner = owner;
+const syncPending = new Set();
+const retries = new Map();
+function activity(name) { if (state.instances[name]) state.instances[name].lastActivity = Date.now(); }
+const extras = new RuntimeExtras({
+  instances: () => state.instances, connections: () => connections, activity,
+  changed: name => {
+    if (syncPending.has(name)) return;
+    syncPending.add(name);
+    enqueue(async () => {
+      syncPending.delete(name);
+      const handle = state.instances[name];
+      if (!handle?.running) return;
+      try { await action({ type: 'sync', name }); handle.syncError = null; }
+      catch (error) { handle.syncError = redact(handle, error.message); }
+    }).catch(error => errors.set(name, error.message));
+  },
+  status: () => enqueue(() => action({ type: 'list' })),
+  logs: async (name, service) => {
+    try { return (await enqueue(() => action({ type: 'logs', name, service }))).output; }
+    catch (error) { throw new Error(redact(state.instances[name], error.message)); }
+  },
+});
 async function save() {
   await writeFile(`${statePath}.tmp`, JSON.stringify(state, null, 2), { mode: 0o600 });
   await rename(`${statePath}.tmp`, statePath);
 }
 async function reserve(spec) {
   for (const service of Object.values(spec.services)) {
+    if (!service.port) continue;
     const existing = routes.get(service.port);
     if (existing) {
       if (existing.protocol !== service.protocol) throw new Error(`Port ${service.port} already uses ${existing.protocol}.`);
@@ -32,7 +61,7 @@ async function reserve(spec) {
     routes.set(service.port, route);
     try {
       for (const host of ['127.0.0.1', '::1']) {
-        const listener = service.protocol === 'tcp' ? createTcpProxy(() => route) : createProxy(service.port, () => route);
+        const listener = service.protocol === 'tcp' ? createTcpProxy(() => route, { onRequest: activity }) : createProxy(service.port, () => route, { onRequest: activity });
         try {
           listener.server.listen(service.port, host);
           await once(listener.server, 'listening');
@@ -53,6 +82,7 @@ async function releaseEmpty() {
   }
 }
 async function disconnect(name) {
+  extras.unwatch(name);
   for (const connection of connections.get(name) ?? []) connection.close();
   connections.delete(name);
   for (const [port, route] of routes) {
@@ -69,12 +99,16 @@ async function connect(handle) {
   connections.set(name, opened);
   for (const connection of opened) {
     const service = handle.services[connection.name];
+    if (!service?.port) continue;
     const route = routes.get(service.port);
     route.targets.set(name, { backendPort: connection.backendPort });
     if (!route.selected || !route.targets.has(route.selected)) route.selected = name;
     state.focus[service.port] = route.selected;
   }
   errors.delete(name);
+  retries.delete(name);
+  extras.watch(handle);
+  await extras.refreshCertificates();
 }
 function instance(name) {
   const handle = Object.hasOwn(state.instances, name) ? state.instances[name] : undefined;
@@ -82,42 +116,84 @@ function instance(name) {
   return handle;
 }
 function summary(handle) {
+  const primary = Object.keys(handle.services).find(key => handle.services[key].protocol === 'http' && handle.services[key].port);
   const name = handle.spec.name;
   const connected = connections.has(name) && connections.get(name).every(item => !item.child || (item.child.exitCode === null && item.child.signalCode === null && !item.child.killed));
   return {
+    worktree: handle.worktree?.cwd,
     name, provider: handle.spec.provider, host: handle.spec.host ?? 'local', running: handle.running, connected,
-    error: errors.get(name),
+    environment: handle.spec.environment ?? handle.spec.environmentName,
+    sync: handle.spec.host ? handle.syncError ?? (handle.spec.watch === false ? 'manual' : 'watching') : 'local files',
+    cloud: handle.spec.cloud ? { serverId: handle.spec.cloud.serverId, expiresAt: handle.spec.cloud.expiresAt, sleeping: !!handle.sleeping } : undefined,
+    error: redact(handle, errors.get(name)),
     services: Object.fromEntries(Object.entries(handle.services).map(([key, service]) => [key, {
       port: service.port, protocol: service.protocol,
-      url: service.protocol === 'http' ? `http://${name}.localhost:${service.port}` : `tcp://localhost:${service.port}`,
+      httpsUrl: service.protocol === 'http' && service.port ? extras.httpsUrl(name, key, primary) : undefined,
+      url: !service.port ? null : service.protocol === 'http' ? `http://${name}.localhost:${service.port}` : `tcp://localhost:${service.port}`,
       selected: routes.get(service.port)?.selected === name,
     }])),
   };
 }
+async function wakeForStorage(handle) {
+  if (!handle.sleeping || !handle.spec.cloud) return;
+  const prepared = await prepareCloud({ ...handle.spec, name: handle.spec.cloud.name }, handle);
+  handle.spec = { ...prepared, name: handle.spec.name };
+  for (const peer of Object.values(state.instances)) if (peer.spec.cloud?.recordId === handle.spec.cloud.recordId) peer.sleeping = false;
+}
+async function sleepUnusedCloud(handle) {
+  const cloud = handle.spec.cloud;
+  const peers = Object.values(state.instances).filter(peer => cloud && peer.spec.cloud?.recordId === cloud.recordId);
+  if (!cloud || peers.some(peer => peer.running)) return;
+  await sleepCloud(handle);
+  for (const peer of peers) peer.sleeping = true;
+  await save();
+}
+function storageOptions(message) {
+  return { endpointUrl: message.endpoint, awsEnv: message.awsEnv, omitUnsupportedMounts: !!message.omitMounts };
+}
 async function action(message) {
   const { name, type } = message;
-  if (type === 'up') {
-    const spec = validate({ ...message.spec, owner });
+  if (type === 'up' || type === 'restore') {
+    let spec = validate({ ...message.spec, owner });
     const provider = providerFor(spec);
     let handle = Object.hasOwn(state.instances, spec.name) ? state.instances[spec.name] : undefined;
-    if (handle && !isDeepStrictEqual(handle.spec, spec)) {
+    if (type === 'restore' && handle) throw new Error('Restore requires a new instance name.');
+    if (type === 'restore' && !provider.docker) throw new Error('This provider does not support volume snapshots.');
+    let restored;
+    const identitySpec = value => { const copy = structuredClone(value); if (copy.cloud) { delete copy.host; delete copy.sshConfig; copy.cloud = { provider: 'hetzner', type: copy.cloud.type ?? 'cx23', location: copy.cloud.location ?? 'fsn1', image: copy.cloud.image ?? 'ubuntu-24.04' }; } return copy; };
+    if (handle && !handle.removed && !isDeepStrictEqual(identitySpec(handle.spec), identitySpec(spec))) {
       throw new Error(`Configuration changed for ${spec.name}. Run dev-now rm ${spec.name}, then up. Volumes remain.`);
     }
     try {
       await reserve(spec);
-      if (handle) {
+      if (spec.cloud) {
+        const cloudName = handle?.spec.cloud?.name ?? spec.name;
+        const prepared = await prepareCloud({ ...spec, name: cloudName }, handle);
+        spec = { ...prepared, name: spec.name };
+        if (handle) handle.spec = spec;
+        for (const peer of Object.values(state.instances)) if (peer.spec.cloud?.recordId === spec.cloud.recordId) {
+          peer.sleeping = false;
+          peer.spec.cloud = { ...spec.cloud };
+        }
+      }
+      if (handle && !handle.removed) {
         // Keep the public listeners while replacing only this instance's tunnels.
         for (const connection of connections.get(spec.name) ?? []) connection.close();
         connections.delete(spec.name);
         await provider.start(handle);
       } else {
+        if (type === 'restore') restored = await restoreSnapshot(spec, message.location, provider, storageOptions(message));
         handle = await provider.create(spec);
         state.instances[spec.name] = handle;
       }
       handle.running = true;
+      handle.removed = false;
+      handle.sleeping = false;
+      activity(handle.spec.name);
       await connect(handle);
       await save();
-      return summary(handle);
+      if (spec.cloud) { handle.spec.cloud = await commitCloud(handle); await save(); }
+      return { ...summary(handle), ...(restored ? { omittedMounts: restored.manifest.omittedMounts } : {}) };
     } catch (error) {
       errors.set(spec.name, error.message);
       if (handle) {
@@ -126,18 +202,25 @@ async function action(message) {
         await disconnect(spec.name);
         await save();
       }
+      if (!handle && restored) {
+        try { await disposeRestoredVolumes(restored, spec, provider); } catch (cleanup) { error.message += ` Volume cleanup failed: ${cleanup.message}`; }
+      }
+      if (!handle && (spec.cloud?.recordId || error.cloud)) {
+        try { await disposeFailedCloud(error.cloud ?? spec); } catch (cleanup) { error.message += ` Cleanup failed: ${cleanup.message}`; }
+      }
       await releaseEmpty();
       throw error;
     }
   }
   if (type === 'list') {
-    return Promise.all(Object.values(state.instances).map(async handle => ({ ...summary(handle), status: await providerFor(handle.spec).status(handle) })));
+    return Promise.all(Object.values(state.instances).map(async handle => ({ ...summary(handle), status: handle.removed ? Object.fromEntries(Object.keys(handle.services).map(key => [key, 'data retained'])) : handle.sleeping ? Object.fromEntries(Object.keys(handle.services).map(key => [key, 'sleeping'])) : await providerFor(handle.spec).status(handle) })));
   }
   if (type === 'use') {
     const handle = instance(name);
     if (!summary(handle).connected) throw new Error('This instance has no active connection. Run dev-now up first.');
     for (const service of Object.values(handle.services)) {
       const route = routes.get(service.port);
+      if (!route) continue;
       if (route.selected !== name) for (const listener of route.listeners) listener.resetFocus();
       route.selected = name;
       state.focus[service.port] = name;
@@ -145,62 +228,134 @@ async function action(message) {
     await save();
     return summary(handle);
   }
+  if (type === 'https') {
+    const result = await extras.enableHttps(message.port ?? 8443);
+    state.httpsPort = result.port;
+    await save();
+    return { ...result, message: `HTTPS enabled on port ${result.port}. Trust the CA with dev-now trust.` };
+  }
+  if (type === 'ui') {
+    const result = await extras.enableUi(message.port ?? 4780);
+    state.uiPort = Number(new URL(result.url).port);
+    await save();
+    return result;
+  }
   if (type === 'down' || type === 'rm') {
     const handles = message.all ? Object.values(state.instances) : [instance(name)];
     for (const handle of handles) {
       const provider = providerFor(handle.spec);
-      if (type === 'rm') await provider.remove(handle, message.purge);
-      else await provider.stop(handle);
-      await disconnect(handle.spec.name);
+      const cloud = handle.spec.cloud;
+      const peers = () => Object.values(state.instances).filter(other => other !== handle && cloud && other.spec.cloud?.recordId === cloud.recordId);
+      if (type === 'rm' && message.removeWorktree && handle.worktree) await removeOwnedWorktree(handle.worktree, { checkOnly: true, dirty: message.discardWorktree ? 'discard' : undefined });
+      extras.unwatch(handle.spec.name);
+      if (type === 'rm' && cloud && message.purge && !peers().length) {
+        await disconnect(handle.spec.name);
+        await destroyCloud(handle);
+      } else {
+        if (handle.sleeping && type === 'rm') {
+          const prepared = await prepareCloud({ ...handle.spec, name: cloud.name }, handle);
+          handle.spec = { ...prepared, name: handle.spec.name };
+          for (const peer of Object.values(state.instances)) if (peer.spec.cloud?.recordId === cloud.recordId) peer.sleeping = false;
+        }
+        if (!handle.sleeping) {
+          if (type === 'rm') { if (!handle.removed || message.purge) await provider.remove(handle, message.purge); }
+          else await provider.stop(handle);
+        }
+        await disconnect(handle.spec.name);
+        if (cloud && !peers().some(peer => peer.running)) {
+          await sleepCloud(handle);
+          for (const peer of [handle, ...peers()]) peer.sleeping = true;
+        }
+      }
       handle.running = false;
-      if (type === 'rm') delete state.instances[handle.spec.name];
+      if (type === 'rm' && message.removeWorktree && handle.worktree) {
+        await removeOwnedWorktree(handle.worktree, { dirty: message.discardWorktree ? 'discard' : undefined });
+        delete handle.worktree;
+      }
+      if (type === 'rm') {
+        if (cloud && !message.purge) handle.removed = true;
+        else delete state.instances[handle.spec.name];
+      }
       await save();
     }
-    return { message: type === 'rm' ? 'Instances removed.' : 'Instances stopped. Volumes remain.' };
+    return { message: type === 'rm' ? (handles.some(handle => handle.removed) ? 'Containers removed. Cloud data remains. Use rm --purge to delete the machine and data.' : 'Instances removed.') : 'Instances stopped. Data remains.' };
+  }
+  if (type === 'snapshot') {
+    const source = instance(name);
+    if (source.running || source.removed) throw new Error('Stop the source containers before a snapshot. Removed containers cannot identify their volumes.');
+    const provider = providerFor(source.spec);
+    if (!provider.docker) throw new Error('This provider does not support volume snapshots.');
+    try {
+      await wakeForStorage(source);
+      const saved = await snapshotInstance(source, message.location, provider, storageOptions(message));
+      return { message: `Saved ${saved.manifest.volumes.length} volumes to ${saved.location}.`, location: saved.location, omittedMounts: saved.manifest.omittedMounts };
+    } finally { await sleepUnusedCloud(source); }
   }
   if (type === 'fork') {
     const source = instance(name);
     const destination = validName(message.destination);
     if (Object.hasOwn(state.instances, destination)) throw new Error('The destination instance already exists.');
+    if (source.running || source.removed) throw new Error('Stop the source before a fork. The source containers must still exist.');
     const provider = providerFor(source.spec);
-    const status = await provider.status(source);
-    if (Object.values(status).some(value => value !== 'exited' && value !== 'created')) throw new Error('Stop the source before a fork. A running database cannot be copied safely.');
-    const spec = { ...source.spec, name: destination };
-    let handle;
+    let worktree, temporary, restored, handle;
+    let spec = { ...source.spec, name: destination };
     try {
+      await wakeForStorage(source);
+      const status = await provider.status(source);
+      if (Object.values(status).some(value => value !== 'exited' && value !== 'created')) throw new Error('Stop the source before a fork. A running database cannot be copied safely.');
+      if (message.worktree || message.branch || message.ref) {
+        worktree = await createWorktree(source.spec, destination, { path: message.worktree, branch: message.branch, ref: message.ref });
+        spec = provider.relocate ? provider.relocate(spec, worktree.cwd) : { ...spec, cwd: worktree.cwd };
+      }
       await reserve(spec);
-      handle = await provider.fork(source, spec);
+      if (spec.provider === 'compose') {
+        temporary = await mkdtemp(join(home, 'fork-'));
+        const location = join(temporary, 'snapshot');
+        await snapshotInstance(source, location, provider, storageOptions(message));
+        restored = await restoreSnapshot(spec, location, provider);
+        handle = await provider.create(spec);
+      } else handle = await provider.fork(source, spec);
+      if (worktree) handle.worktree = worktree;
       state.instances[destination] = handle;
       handle.running = true;
+      activity(destination);
       await connect(handle);
       await save();
-      return summary(handle);
+      return { ...summary(handle), omittedPaths: worktree?.omittedPaths };
     } catch (error) {
       errors.set(destination, error.message);
       if (handle) {
         await provider.stop(handle).catch(() => {});
         handle.running = false;
         await disconnect(destination);
+      } else {
+        if (restored) await disposeRestoredVolumes(restored, spec, provider).catch(cleanup => { error.message += ` Volume cleanup failed: ${cleanup.message}`; });
+        if (worktree) await removeOwnedWorktree(worktree, { dirty: 'discard' }).catch(cleanup => { error.message += ` Worktree cleanup failed: ${cleanup.message}`; });
       }
       await releaseEmpty();
+      await sleepUnusedCloud(source).catch(() => {});
       await save();
       throw error;
-    }
+    } finally { if (temporary) await rm(temporary, { recursive: true, force: true }); }
   }
   if (['logs', 'exec', 'sync'].includes(type)) {
     const handle = instance(name);
     const provider = providerFor(handle.spec);
+    activity(name);
+    if (handle.sleeping) throw new Error('The cloud machine is sleeping. Run dev-now up first.');
     if (type === 'sync') { await provider.sync(handle); return { message: 'Files synchronized.' }; }
     const service = message.service ?? Object.keys(handle.services)[0];
     if (!handle.services[service]) throw new Error(`Service ${service} does not exist.`);
     const output = type === 'logs' ? await provider.logs(handle, service) : await provider.exec(handle, service, message.command);
-    return { output };
+    return { output: redact(handle, output) };
   }
   throw new Error(`Unknown action: ${type}.`);
 }
 let queue = Promise.resolve();
+function enqueue(work) { const pending = queue.then(work); queue = pending.catch(() => {}); return pending; }
 let shuttingDown = false;
 const control = http.createServer(async (request, response) => {
+  let commandMessage;
   try {
     let body = '';
     for await (const part of request) {
@@ -208,6 +363,7 @@ const control = http.createServer(async (request, response) => {
       if (body.length > 1024 * 1024) throw new Error('The request is too large.');
     }
     const message = JSON.parse(body);
+    commandMessage = message;
     let result;
     if (message.type === 'ping') result = { pid: process.pid };
     else if (message.type === 'shutdown') {
@@ -216,24 +372,33 @@ const control = http.createServer(async (request, response) => {
       queue = queue.then(async () => { await shutdown(); });
     } else {
       if (shuttingDown) throw new Error('The daemon is stopping.');
-      const work = queue.then(() => action(message));
-      queue = work.catch(() => {});
-      result = await work;
+      result = await enqueue(() => action(message));
     }
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify(result));
   } catch (error) {
     response.writeHead(400, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ error: error.message, exitCode: error.exitCode ?? 1 }));
+    if (error.cleanupError) error.message += ` Cleanup needs attention: ${error.cleanupError.message}`;
+    if (error.cleanupErrors?.length) error.message += ` Cleanup needs attention: ${error.cleanupErrors.map(item => item.message).join(' ')}`;
+    let safeError = redact({ spec: { ...commandMessage?.spec, env: { ...commandMessage?.spec?.env, ...commandMessage?.awsEnv } } }, error.message);
+    for (const handle of Object.values(state.instances)) safeError = redact(handle, safeError);
+    response.end(JSON.stringify({ error: safeError, exitCode: error.exitCode ?? 1 }));
   }
 });
 async function shutdown() {
-  for (const opened of connections.values()) for (const item of opened) item.close();
-  for (const route of routes.values()) for (const listener of route.listeners) await listener.close();
-  await disposeProviders();
-  control.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 1000).unref();
+  clearInterval(maintenance);
+  try {
+    await extras.close();
+    for (const opened of connections.values()) for (const item of opened) item.close();
+    for (const route of routes.values()) for (const listener of route.listeners) await listener.close();
+    await disposeProviders();
+  } catch { console.error('Provider cleanup failed during shutdown. Check for remaining provider sessions.'); }
+  finally {
+    control.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 1000).unref();
+  }
 }
+
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { shuttingDown = true; queue.finally(shutdown); });
 control.listen(socketPath);
 await once(control, 'listening');
@@ -242,12 +407,54 @@ queue = (async () => {
   const preferred = { ...state.focus };
   for (const handle of Object.values(state.instances)) {
     if (!handle.running) continue;
-    try { await providerFor(handle.spec).wait(handle); await connect(handle); }
+    try { await providerFor(handle.spec).wait(handle); await connect(handle); activity(handle.spec.name); }
     catch (error) { errors.set(handle.spec.name, error.message); await releaseEmpty(); }
   }
   for (const [port, route] of routes) {
     if (route.targets.has(preferred[port])) route.selected = preferred[port];
     state.focus[port] = route.selected;
   }
+  if (state.httpsPort !== undefined) await extras.enableHttps(state.httpsPort);
+  if (state.uiPort !== undefined) await extras.enableUi(state.uiPort);
   await save();
 })().catch(error => console.error(error.message));
+
+let maintaining = false;
+const maintenance = setInterval(() => {
+  if (shuttingDown || maintaining) return;
+  maintaining = true;
+  enqueue(async () => {
+    const now = Date.now();
+    for (const handle of Object.values(state.instances)) {
+      const name = handle.spec.name;
+      const cloud = handle.spec.cloud;
+      if (cloud?.expiresAt && Date.parse(cloud.expiresAt) <= now) {
+        try { await action({ type: 'rm', name, purge: true }); } catch (error) { errors.set(name, error.message); }
+        continue;
+      }
+      if (!handle.running) continue;
+      const peers = Object.values(state.instances).filter(peer => cloud && peer.spec.cloud?.recordId === cloud.recordId);
+      const lastActivity = Math.max(handle.lastActivity ?? now, ...peers.map(peer => peer.lastActivity ?? now));
+      if (cloud?.idleTimeoutMs && now - lastActivity > cloud.idleTimeoutMs) {
+        try { await action({ type: 'down', name }); } catch (error) { errors.set(name, error.message); }
+        continue;
+      }
+      if (!handle.spec.host || summary(handle).connected) continue;
+      const retry = retries.get(name) ?? { next: 0, count: 0 };
+      if (now < retry.next) continue;
+      try {
+        for (const connection of connections.get(name) ?? []) connection.close();
+        connections.delete(name);
+        await providerFor(handle.spec).wait(handle);
+        await connect(handle);
+        await save();
+      } catch (error) {
+        retry.count++;
+        retry.next = Date.now() + Math.min(60000, 1000 * 2 ** Math.min(retry.count, 6));
+        retries.set(name, retry);
+        errors.set(name, redact(handle, `Reconnecting: ${error.message}`));
+      }
+    }
+  }).catch(error => console.error(error.message)).finally(() => { maintaining = false; });
+}, 2000);
+maintenance.unref();

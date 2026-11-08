@@ -12,7 +12,7 @@
       "port": 55432,
       "containerPort": 5432,
       "protocol": "tcp",
-      "health": "pg_isready -U postgres",
+      "health": "pg_isready -h 127.0.0.1 -U postgres",
       "env": { "POSTGRES_PASSWORD": "dev-only", "POSTGRES_DB": "app" },
       "volumes": { "data": "/var/lib/postgresql/data" }
     }

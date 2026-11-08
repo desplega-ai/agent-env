@@ -1,6 +1,6 @@
 {
   "name": "dev-now",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Run development services behind stable localhost addresses.",
   "type": "module",
   "bin": {
@@ -8,8 +8,11 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --check bin/dev-now.mjs && node --check src/daemon.mjs && node --check src/proxy.mjs && node --check src/config.mjs && node --check src/system.mjs && node --check src/providers/docker.mjs && node --check src/providers/index.mjs",
-    "test:e2e": "node test/e2e.mjs"
+    "check": "node scripts/check.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "test:runtime": "node test/runtime-e2e.mjs",
+    "test:features": "node test/features-e2e.mjs",
+    "test:compose": "node test/compose.e2e.mjs"
   },
   "engines": {
     "node": ">=22"

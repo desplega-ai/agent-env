@@ -23,7 +23,7 @@ function aws(options, args) {
   return run(options.awsCommand ?? 'aws', [
     ...(options.endpointUrl ? ['--endpoint-url', options.endpointUrl] : []),
     '--no-cli-pager', 's3api', ...args,
-  ], { env: { ...process.env, AWS_PAGER: '' } });
+  ], { env: { ...process.env, ...options.awsEnv, AWS_PAGER: '' } });
 }
 
 async function allContainers(provider, spec) {
@@ -60,7 +60,7 @@ async function discover(handle, provider, options) {
       const omit = reason => {
         omittedMounts.push({ service, target: mount.Destination, type: mount.Type, reason });
       };
-      if (mount.Type === 'bind' && mount.Destination === '/workspace' && mount.Source === (handle.workspace ?? handle.spec.cwd)) {
+      if (mount.Type === 'bind' && (mount.Source === (handle.workspace ?? handle.spec.cwd) || mount.Source?.startsWith(`${handle.workspace ?? handle.spec.cwd}/`))) {
         omit('Source files require a separate Git worktree or source synchronization.');
         continue;
       }
@@ -289,8 +289,9 @@ export async function snapshotInstance(handle, location, provider, options = {})
 
 async function destinationVolumes(spec, manifest, provider, options) {
   const names = new Set();
+  const mapped = options.volumeNames ?? await provider.snapshotVolumeNames?.(spec, manifest);
   return manifest.volumes.map(volume => {
-    let name = options.volumeNames?.[volume.id];
+    let name = mapped?.[volume.id];
     if (!name) {
       const destinations = volume.mounts.map(mount => {
         const key = Object.entries(spec.services?.[mount.service]?.volumes ?? {}).find(([, target]) => target === mount.target)?.[0];
@@ -340,12 +341,14 @@ export async function restoreSnapshot(spec, location, provider, options = {}) {
     for (const volume of volumes) {
       // Docker volume create is idempotent. A unique claim label detects a concurrent creator.
       created.push(volume.destinationName);
-      await provider.docker(spec, ['volume', 'create', '--label', `dev-now.owner=${spec.owner}`, '--label', `dev-now.restore=${token}`, volume.destinationName]);
+      const labels = provider.snapshotVolumeLabels?.(spec, volume.destinationName) ?? {};
+      await provider.docker(spec, ['volume', 'create', '--label', `dev-now.owner=${spec.owner}`, '--label', `dev-now.restore=${token}`,
+        ...Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]), volume.destinationName]);
       const info = JSON.parse(await provider.docker(spec, ['volume', 'inspect', volume.destinationName]))[0];
       if (info.Labels?.['dev-now.restore'] !== token) throw new Error('Another operation created the destination volume. Restore stopped without modifying it.');
       await archiveVolume(provider, spec, volume.destinationName, join(directory, volume.archive), options, true);
     }
-    return { location, manifest, volumes, volumeNames: Object.fromEntries(volumes.map(volume => [volume.id, volume.destinationName])) };
+    return { location, manifest, volumes, restoreId: token, volumeNames: Object.fromEntries(volumes.map(volume => [volume.id, volume.destinationName])) };
   } catch (error) {
     const cleanupErrors = [];
     for (const name of created.reverse()) {
@@ -357,4 +360,12 @@ export async function restoreSnapshot(spec, location, provider, options = {}) {
     if (cleanupErrors.length) error.cleanupErrors = cleanupErrors;
     throw error;
   } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
+export async function disposeRestoredVolumes(result, spec, provider) {
+  for (const volume of result.volumes) {
+    const info = JSON.parse(await provider.docker(spec, ['volume', 'inspect', volume.destinationName]))[0];
+    if (info.Labels?.['dev-now.restore'] !== result.restoreId) throw new Error('The restored volume ownership changed. Cleanup stopped.');
+    await provider.docker(spec, ['volume', 'rm', volume.destinationName]);
+  }
 }

@@ -140,6 +140,7 @@ export async function removeOwnedWorktree(result, options = {}) {
   if (root !== path || commonDir !== saved.commonDir || branch !== `refs/heads/${saved.branch}`) throw new Error('Git does not identify this checkout as the owned worktree.');
   const status = await git(path, ['status', '--porcelain=v1', '--untracked-files=all', '--ignored=matching', '-z']);
   if (status.length && options.dirty !== 'discard') throw new Error('The worktree is dirty. Preserve its files or explicitly select dirty: discard.');
+  if (options.checkOnly) return { checked: path };
   const head = await text(path, ['rev-parse', 'HEAD']);
   await git(commonDir, ['worktree', 'remove', ...(options.dirty === 'discard' ? ['--force'] : []), '--', path]);
   let branchRetained = head !== saved.head;

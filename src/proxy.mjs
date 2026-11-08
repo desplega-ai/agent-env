@@ -1,4 +1,5 @@
 import http from 'node:http';
+import http2 from 'node:http2';
 import net from 'node:net';
 
 function hostname(authority) {
@@ -27,41 +28,47 @@ export function selectTarget(request, targets, selected) {
   return target ? { target, focused, id } : { status: 404, error: 'No running service matches this address. Run dev-now list.' };
 }
 
-function headersFor(request, port, id) {
+function headersFor(request, port, id, secure = false) {
   const headers = { ...request.headers, host: `localhost:${port}` };
+  for (const key of Object.keys(headers)) if (key.startsWith(':')) delete headers[key];
   if (headers.origin) {
     try {
       const origin = new URL(headers.origin);
       if (origin.hostname === hostname(request.headers.host) || origin.hostname === `${id}.localhost`) {
+        if (secure && origin.host === request.headers.host) origin.port = String(port);
         origin.hostname = 'localhost';
         headers.origin = origin.origin;
       }
     } catch { /* Preserve an origin that is not a URL. */ }
   }
   headers['x-forwarded-host'] = request.headers.host;
-  headers['x-forwarded-proto'] = 'http';
+  headers['x-forwarded-proto'] = secure ? 'https' : 'http';
   headers['x-forwarded-for'] = request.socket.remoteAddress;
   return headers;
 }
 
-export function createProxy(port, getRoutes) {
+export function createProxy(port, getRoutes, options = {}) {
   const sockets = new Set();
   const focusedSockets = new Set();
-  const server = http.createServer((request, response) => {
-    const { targets, selected } = getRoutes();
+  const handler = (request, response) => {
+    request.headers.host ??= request.headers[':authority'];
+    const { targets, selected } = getRoutes(request);
     const result = selectTarget(request, targets, selected);
     if (!result.target) {
       response.writeHead(result.status, { 'content-type': 'text/plain' });
       response.end(`${result.error}\n`);
       return;
     }
+    options.onRequest?.(result.id);
     if (result.focused) focusedSockets.add(request.socket);
     else focusedSockets.delete(request.socket);
     const upstream = http.request({
       hostname: '127.0.0.1', port: result.target.backendPort,
-      method: request.method, path: request.url, headers: headersFor(request, port, result.id),
+      method: request.method, path: request.url, headers: headersFor(request, result.target.publicPort ?? port, result.id, !!options.tls),
     }, (incoming) => {
-      response.writeHead(incoming.statusCode, incoming.headers);
+      const headers = { ...incoming.headers };
+      if (request.httpVersionMajor === 2) for (const key of ['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade']) delete headers[key];
+      response.writeHead(incoming.statusCode, headers);
       incoming.pipe(response);
       incoming.on('error', () => response.destroy());
     });
@@ -72,17 +79,20 @@ export function createProxy(port, getRoutes) {
     request.on('aborted', () => upstream.destroy());
     response.on('close', () => upstream.destroy());
     request.pipe(upstream);
-  });
+  };
+  const server = options.tls ? http2.createSecureServer({ ...options.tls, allowHTTP1: true }, handler) : http.createServer(handler);
   server.on('upgrade', (request, socket, head) => {
-    const { targets, selected } = getRoutes();
+    const { targets, selected } = getRoutes(request);
     const result = selectTarget(request, targets, selected);
     if (!result.target) {
       socket.end(`HTTP/1.1 ${result.status} Not Found\r\nConnection: close\r\n\r\n`);
       return;
     }
+    options.onRequest?.(result.id);
+    socket.on('data', () => options.onRequest?.(result.id));
     if (result.focused) focusedSockets.add(socket);
     const upstream = net.connect(result.target.backendPort, '127.0.0.1', () => {
-      const headers = headersFor(request, port, result.id);
+      const headers = headersFor(request, result.target.publicPort ?? port, result.id, !!options.tls);
       upstream.write(`${request.method} ${request.url} HTTP/${request.httpVersion}\r\n`);
       for (const [key, value] of Object.entries(headers)) {
         for (const item of Array.isArray(value) ? value : [value]) {
@@ -112,12 +122,14 @@ export function createProxy(port, getRoutes) {
   };
 }
 
-export function createTcpProxy(getRoutes) {
+export function createTcpProxy(getRoutes, options = {}) {
   const sockets = new Set();
   const server = net.createServer(socket => {
     const { targets, selected } = getRoutes();
     const target = targets.get(selected);
     if (!target) { socket.destroy(); return; }
+    options.onRequest?.(selected);
+    socket.on('data', () => options.onRequest?.(selected));
     const upstream = net.connect(target.backendPort, '127.0.0.1');
     sockets.add(socket);
     socket.on('close', () => { sockets.delete(socket); upstream.destroy(); });

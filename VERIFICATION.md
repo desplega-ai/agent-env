@@ -1,52 +1,87 @@
 # Verification
 
-Verified on 2026-11-08 (BCN).
+Verified on 2026-11-08 (BCN), on macOS with Node 26.0.0 and Docker.
+The installed `/opt/homebrew/bin/dev-now` links to this checkout. No build step or npm dependencies are required.
+Node 22 is the declared minimum. This session did not test Node 22 directly.
 
-The CLI is installed at `/opt/homebrew/bin/dev-now` through a link to this checkout.
-The implementation uses no third-party Node packages and requires no build step.
+## Automated checks
 
-## Checks
+- `npm run check` and `git diff --check` passed.
+- `npm test` passed all 75 tests, with no skips.
+- Native Docker E2E passed locally and through SSH.
+- Compose provider E2E passed builds, profiles, dependencies, completed jobs, aliases, health, isolation, external resources, and cleanup.
+- Integrated Compose CLI E2E passed locally and through SSH.
+- Runtime E2E passed HTTPS, dashboard requests, redaction, and daemon restart.
+- Remote runtime E2E killed an owned SSH tunnel and confirmed automatic recovery.
+- Remote runtime E2E confirmed automatic source synchronization.
+- The registered sandbox Docker bridge passed the runtime E2E.
+- Generated Postgres and Redis templates passed with native Docker and Compose. Redis retained writes across restart.
 
-- `npm run check`: passed syntax checks for the CLI and runtime modules.
-- `npm test`: passed six tests covering configuration, shell quoting, HTTP routing, request bodies, cookies, WebSocket upgrades, streaming, and connection selection.
-- `npm run test:e2e`: passed with local Docker on macOS and Node 26.0.0.
-- `DEV_NOW_TEST_SSH=dev-now-test DEV_NOW_TEST_SSH_CONFIG=<temporary-config> npm run test:e2e`: passed against a temporary Hetzner CX23 running Ubuntu 24.04.
-- The installed CLI started `examples/hello`, including its Postgres service.
-- `curl http://demo.localhost:3300/` returned the example without a DNS override.
-- `curl -g 'http://[::1]:3300/'` returned the same example through IPv6 loopback.
-- Immediate daemon stop, start, and stop commands passed without an external delay.
+The integrated Compose test exercised environment secrets, source preservation, Git worktree creation, copied changes, omitted credentials, snapshots, restore, and independent Postgres writes.
+The native Docker test also checked occupied ports, failed startup cleanup, retained-volume protection, command exit codes, and paths containing spaces.
 
-The complete local and remote tests checked these behaviors:
+The cached local example started in approximately 4.2 seconds and resumed in 0.65 seconds.
+The remote native stack started in approximately 10 seconds and resumed in 4.1 seconds during this run.
+These measurements depend on image caches, machine load, and network latency.
 
-- Multiple stacks share public ports and have independent named addresses.
-- Hostname selection and bare-localhost selection route requests correctly.
-- Postgres responds through the TCP proxy.
-- Each stack has separate database and application volumes.
-- Data survives container stop and resume.
-- Remote source changes synchronize, while `.env` stays local.
-- Daemon restart restores routing and the selected instance.
-- Forks copy stopped data and preserve independent database writes.
-- A running source cannot be forked.
-- A fork cannot overwrite retained destination volumes.
-- Failed initial starts remove newly allocated volumes.
-- Occupied public ports fail without stopping their owner.
-- An executed command's exit code reaches the CLI.
-- Workspace and state paths containing spaces work locally and through SSH.
+## S3
 
-HTTP and WebSocket checks used protocol clients. No browser UI test was required or performed.
-Node 22 is the declared minimum. The host test run used Node 26.
+A temporary SeaweedFS server supplied a real S3-compatible endpoint.
+The test used this official Docker image digest:
 
-## Cleanup
+`chrislusf/seaweedfs@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860`
 
-The temporary Hetzner server, its IPv4 and IPv6 addresses, and the temporary SSH key were deleted.
-The original Hetzner SSH key remains.
-No test containers, networks, volumes, daemons, or SSH tunnels remained.
-The tests removed their temporary directories. Final cleanup removed another 60 KiB of temporary files, including the private test key.
-`df -h /` showed 12 GiB available immediately before and after final cleanup.
-Shared Docker images and other shared caches remain.
+The CLI exported stopped Postgres volumes, restored fresh volumes from S3, and verified independent database contents.
+A second conditional write to the existing manifest failed with a precondition error.
+AWS-hosted S3 was not tested. Unit tests also cover AWS CLI arguments and interrupted transfers.
+The [SeaweedFS quick start](https://github.com/seaweedfs/seaweedfs#quick-start) documents the temporary server configuration.
 
-## Scope
+## Hetzner
 
-Implemented: Docker locally and over SSH, localhost routing, persistent volumes, cache mounts, service stacks, and stopped-volume forks.
-Not implemented: Firecracker execution, S3 backup or restore, automatic VPS provisioning, continuous file synchronization, HTTPS, and a browser switcher.
-The README and provider contract describe these extension points.
+The new cloud module provisioned a CX23 in hel1 with Ubuntu 24.04, Docker, Compose, rsync, dedicated SSH credentials, and a pinned host key.
+Live CLI checks confirmed:
+
+- Startup and local HTTP access.
+- Container shutdown followed by machine shutdown.
+- Resume with durable volume contents.
+- Container removal with visible retained cloud data.
+- Recreating containers from retained volumes.
+- Automatic idle shutdown after an explicit short test timeout.
+- Resume after idle shutdown.
+- Forking onto the same owned machine with independent volume contents.
+- Expiry of both instances, followed by deletion of the owned server, IPv4 address, and SSH key.
+
+A transient power-on failure occurred during testing. A retry succeeded without replacing the machine.
+The module now reconciles state and retries bounded power-on failures. Regression tests cover failures before and after the API side effect.
+The final server inventory was empty. Checks also confirmed deletion of the owned IP and key.
+Unrelated SSH keys remained untouched.
+
+## HTTPS and UI
+
+Protocol tests validated the private CA, exact hostnames, HTTP/1.1, HTTP/2, secure upgrade forwarding, and same-origin header translation.
+They also checked conflicting HTTPS aliases and dashboard access restrictions.
+The session did not install the CA into the user's trust store. HTTPS clients used the generated CA explicitly.
+
+Agent-browser verified the dashboard at 1440×900 and 390×844.
+The mobile document width and scroll width were both 390 pixels.
+Logs opened and closed correctly. The refresh preference survived reload.
+Axe reported zero violations, zero incomplete checks, and 34 passes.
+
+- [Desktop screenshot](docs/screenshots/dashboard-desktop.png)
+- [Mobile screenshot](docs/screenshots/dashboard-mobile.png)
+
+These checks used automated Chromium. They do not establish physical Safari behavior.
+
+## Cleanup and boundaries
+
+The owned cloud machine, IP, and key were deleted.
+The temporary S3 container, its data, its test image, and failed-test build image tags were removed.
+Temporary UI services and the browser session were stopped.
+Implementation worktrees were integrated and removed. All 18 task-prefixed temporary artifacts were removed.
+Final Docker inventories contained no dev-now test containers or volumes.
+Shared Docker caches were preserved. No global prune command ran.
+
+Disk availability changed from 9.8 GiB before cleanup to 11 GiB after temporary files and test images were removed.
+The daemon must remain running and connected for idle shutdown and expiry.
+Snapshots contain volume data, not a complete deployable source bundle.
+Firecracker execution and specific hosted sandbox vendors remain separate adapter work.

@@ -1,24 +1,37 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { mkdir, open, unlink, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, unlink, rm, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { trustTls } from '../src/tls.mjs';
 import { parseArgs } from 'node:util';
 import { home, socketPath } from '../src/paths.mjs';
 import { loadSpec } from '../src/config.mjs';
+import { initialize } from '../src/init.mjs';
+import { addService } from '../src/goodies.mjs';
+import { setEnvironmentSecret, listEnvironmentSecrets, unsetEnvironmentSecret } from '../src/environments.mjs';
 import { delay } from '../src/system.mjs';
 
 const help = `dev-now: development services with stable localhost addresses
 
   dev-now init                       Create dev-now.json
+  dev-now add postgres | redis       Add a persistent service
   dev-now up [--ssh user@host]        Start the configured stack
   dev-now up --name demo --port 3000 -- node server.js
   dev-now list                       Show services and addresses
+  dev-now ui                         Open the local status dashboard
+  dev-now https [--https-port 8443]   Enable local HTTPS
+  dev-now trust                      Trust the local certificate authority
   dev-now use NAME                   Select NAME for bare localhost
   dev-now logs NAME [--service web]  Read recent service logs
   dev-now exec NAME [--service db] -- COMMAND [ARGS...]
   dev-now sync NAME                  Copy local changes to an SSH host
+  dev-now env set KEY [--from-env VAR] Store a secret from stdin or a variable
+  dev-now env list | unset KEY       Manage secret names for --env NAME
+  dev-now snapshot NAME LOCATION     Save stopped volumes locally or to S3
+  dev-now restore LOCATION --name NAME  Restore into a new instance
+  dev-now fork SOURCE DEST --worktree PATH  Fork source files and data
   dev-now down NAME | --all          Stop containers and retain data
   dev-now fork SOURCE DESTINATION    Copy stopped volumes and start a fork
   dev-now rm NAME [--purge]          Remove containers, optionally data
@@ -26,6 +39,7 @@ const help = `dev-now: development services with stable localhost addresses
 
 Options: --name NAME, --port PORT, --image IMAGE, --ssh HOST,
          --ssh-config FILE, --local, --config FILE, --service NAME, --json
+         --cloud hetzner, --env NAME, --https, --https-port PORT, --no-watch
 
 Requires Node 22+ and Docker. SSH targets require Docker, rsync, and Bash.
 HTTP supports named hosts and WebSockets. TCP uses the selected instance.
@@ -82,32 +96,54 @@ function display(result, json) {
   if (json) { console.log(JSON.stringify(result, null, 2)); return; }
   if (Array.isArray(result)) {
     if (!result.length) console.log('No instances. Run dev-now up.');
-    for (const item of result) display(item, false);
-  } else if ('output' in result) console.log(result.output);
+    for (const item of result) typeof item === 'string' ? console.log(item) : display(item, false);
+  } else if (result.url) console.log(result.url);
+  else if ('output' in result) console.log(result.output);
   else if (result.message) console.log(result.message);
   else if (result.name) {
     console.log(`${result.name} (${result.host}, ${result.connected ? 'connected' : result.running ? 'disconnected' : 'stopped'})`);
     for (const [name, service] of Object.entries(result.services)) {
-      console.log(`  ${name.padEnd(12)} ${service.url}${service.selected ? '  [localhost selected]' : ''}${result.status ? `  ${result.status[name]}` : ''}`);
+      console.log(`  ${name.padEnd(12)} ${service.httpsUrl ?? service.url ?? 'internal'}${service.selected ? '  [localhost selected]' : ''}${result.status ? `  ${result.status[name]}` : ''}`);
     }
+    if (result.worktree) console.log(`  Source: ${result.worktree}`);
     if (result.error) console.log(`  ${result.error}`);
   }
+  for (const mount of result.omittedMounts ?? []) console.log(`  Omitted ${mount.service}:${mount.target}: ${mount.reason}`);
+  for (const path of result.omittedPaths ?? []) console.log(`  Omitted source file: ${path}`);
 }
 async function main() {
   const args = process.argv.slice(2);
   const separator = args.indexOf('--');
   const command = separator < 0 ? [] : args.splice(separator).slice(1);
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
+    'env-file': { type: 'string', multiple: true }, 'from-env': { type: 'string' },
+    'remove-worktree': { type: 'boolean' }, 'discard-worktree': { type: 'boolean' }, 'omit-mounts': { type: 'boolean' },
+    cloud: { type: 'string' }, 'cloud-type': { type: 'string' }, location: { type: 'string' }, 'idle-minutes': { type: 'string' }, 'ttl-hours': { type: 'string' },
+    provider: { type: 'string' }, adapter: { type: 'string' }, env: { type: 'string' }, profile: { type: 'string', multiple: true }, 'compose-file': { type: 'string', multiple: true },
+    https: { type: 'boolean' }, 'https-port': { type: 'string' }, 'no-watch': { type: 'boolean' },
+    worktree: { type: 'string' }, branch: { type: 'string' }, ref: { type: 'string' }, endpoint: { type: 'string' },
     name: { type: 'string' }, port: { type: 'string' }, image: { type: 'string' }, ssh: { type: 'string' },
     'ssh-config': { type: 'string' }, local: { type: 'boolean' }, config: { type: 'string' }, service: { type: 'string' },
     json: { type: 'boolean' }, all: { type: 'boolean' }, purge: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   } });
   const [type, name, destination] = positionals;
   if (!type || values.help || type === 'help') { console.log(help); return; }
+  if (type === 'trust') { display(await trustTls(), values.json); return; }
+  if (type === 'add') { display(await addService(name, { config: values.config, port: values.port, environment: values.env }), values.json); return; }
   if (type === 'init') {
-    const config = { services: { web: { image: 'node:22-bookworm-slim', port: 3000, command: 'npm install && npm run dev', volumes: { dependencies: '/workspace/node_modules', cache: '/root/.npm' } } } };
-    await writeFile('dev-now.json', `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx' });
-    console.log('Created dev-now.json. Set your command and bind the server to 0.0.0.0.');
+    const result = await initialize({ config: values.config, command, port: values.port, image: values.image });
+    display({ message: `Created ${result.filename}. Run dev-now up.` }, values.json);
+    return;
+  }
+  if (type === 'env') {
+    const options = { cwd: process.cwd(), environment: values.env ?? 'default', key: destination };
+    if (name === 'list') display(await listEnvironmentSecrets(options), values.json);
+    else if (name === 'unset') display({ message: await unsetEnvironmentSecret(options) ? 'Secret removed.' : 'Secret was not set.' }, values.json);
+    else if (name === 'set') {
+      if (!values['from-env'] && process.stdin.isTTY) throw new Error('Provide the secret through stdin or --from-env VARIABLE.');
+      await setEnvironmentSecret({ ...options, ...(values['from-env'] ? { fromEnv: values['from-env'] } : { stdin: process.stdin }) });
+      display({ message: `Stored ${destination} for environment ${options.environment}.` }, values.json);
+    } else throw new Error('Use env set KEY, env list, or env unset KEY.');
     return;
   }
   if (type === 'daemon' && name === 'stop') {
@@ -123,14 +159,39 @@ async function main() {
     }
     throw new Error('The daemon is still stopping. Wait for the current operation to finish.');
   }
-  if (!['up', 'list', 'use', 'logs', 'exec', 'sync', 'down', 'rm', 'fork'].includes(type)) throw new Error(`Unknown command: ${type}. Run dev-now --help.`);
-  if (!['up', 'list'].includes(type) && !name && !(values.all && ['down', 'rm'].includes(type))) throw new Error(`Specify an instance name for ${type}.`);
-  if (type === 'fork' && !destination) throw new Error('Specify a destination name.');
+  if (!['up', 'list', 'use', 'logs', 'exec', 'sync', 'down', 'rm', 'fork', 'ui', 'https', 'snapshot', 'restore'].includes(type)) throw new Error(`Unknown command: ${type}. Run dev-now --help.`);
+  if (!['up', 'list', 'ui', 'https', 'restore'].includes(type) && !name && !(values.all && ['down', 'rm'].includes(type))) throw new Error(`Specify an instance name for ${type}.`);
+  if (['fork', 'snapshot'].includes(type) && !destination) throw new Error('Specify a destination name.');
   if (type === 'exec' && !command.length) throw new Error('Specify a command after --.');
-  const message = { type, name, destination, service: values.service, command, all: values.all, purge: values.purge };
-  if (type === 'up') message.spec = await loadSpec(values, command);
+  if (type === 'restore' && !name) throw new Error('Specify a snapshot directory or S3 URL.');
+  if (values['discard-worktree'] && !values['remove-worktree']) throw new Error('Use --discard-worktree with --remove-worktree.');
+  const message = { type, name, destination, service: values.service, command, all: values.all, purge: values.purge, worktree: values.worktree ? resolve(values.worktree) : undefined, branch: values.branch, ref: values.ref, endpoint: values.endpoint, removeWorktree: values['remove-worktree'], discardWorktree: values['discard-worktree'], omitMounts: values['omit-mounts'] };
+  if (type === 'snapshot' || type === 'restore') {
+    const location = type === 'snapshot' ? destination : name;
+    message.location = location.startsWith('s3://') ? location : resolve(location);
+    message.awsEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_PROFILE', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_ENDPOINT_URL_S3', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_CONFIG_FILE', 'AWS_CA_BUNDLE'].includes(key)));
+  }
+  if (type === 'https') message.port = Number(values['https-port'] ?? 8443);
+  if (type === 'ui') message.port = Number(values.port ?? 4780);
+  if (type === 'up' || type === 'restore') {
+    message.spec = await loadSpec(values, command);
+    if (values.provider) message.spec.provider = values.provider;
+    if (values.adapter) message.spec.sandbox = { ...message.spec.sandbox, adapter: values.adapter };
+    if (values.cloud) message.spec.cloud = { provider: values.cloud, ...(values['cloud-type'] ? { type: values['cloud-type'] } : {}), ...(values.location ? { location: values.location } : {}) };
+    if (values['idle-minutes'] !== undefined) message.spec.cloud = { ...message.spec.cloud, idleTimeoutMs: Number(values['idle-minutes']) * 60000 };
+    if (values['ttl-hours'] !== undefined) {
+      const hours = Number(values['ttl-hours']);
+      if (!Number.isFinite(hours) || hours <= 0) throw new Error('TTL hours must be a positive number.');
+      message.spec.cloud = { ...message.spec.cloud, expiresAt: new Date(Date.now() + hours * 3600000).toISOString() };
+    }
+    if (values['no-watch']) message.spec.watch = false;
+  }
   await ensureDaemon();
   if (type === 'up' && !values.json) console.error('Starting services. The first image download can take longer.');
-  display(await request(message), values.json);
+  const result = await request(message);
+  if (type === 'up' && values.https) {
+    await request({ type: 'https', port: Number(values['https-port'] ?? 8443) });
+    display((await request({ type: 'list' })).find(item => item.name === result.name), values.json);
+  } else display(result, values.json);
 }
 main().catch(error => { console.error(`dev-now: ${error.message}`); process.exitCode = error.exitCode ?? 1; });

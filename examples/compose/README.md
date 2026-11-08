@@ -3,7 +3,7 @@
 This project builds a Node web service and starts Postgres after its health check succeeds.
 The `tools` service requires the `tools` profile.
 
-The parent CLI must register `ComposeProvider` and accept the new options before these commands work:
+Use these commands from this directory:
 
 ```sh
 dev-now init
@@ -63,7 +63,7 @@ Use explicit protocols for ports that do not match common HTTP ports.
 UDP, replicas, host namespaces, static addresses, custom network allocation, and volume driver options require separate support.
 The provider rejects these features. External networks and volumes remain external and survive purge.
 Remote bind and build paths must resolve inside the checkout. Remote binds cannot use files excluded from synchronization.
-Compose volume forks require snapshot support and currently return an explicit error.
+The daemon implements Compose volume forks through verified snapshots.
 
 ## Integration contract
 
@@ -71,7 +71,7 @@ Import `ComposeProvider` from `src/providers/compose.mjs` and register it under 
 Docker Compose must support `config --format json`, `config --variables`, and `up --wait`.
 The class implements the Docker provider interface. It uses the Docker helpers for commands, synchronization, SSH, and tunnels.
 `create`, `start`, and `wait` retain desired public ports and discover private backend ports.
-`fork` returns an explicit unsupported-feature error.
+The daemon coordinates snapshot-based forks. Direct provider `fork` calls remain unsupported.
 
 Each `spec.services` and `handle.services` entry has `composeService`.
 Internal entries have `internal: true` and no `port`, `protocol`, or HTTP URL.
@@ -98,7 +98,7 @@ These helpers also accept `home` to select the private state directory.
 
 `redactEnvironment(output, values)` accepts an array or an object with private values.
 Compose logs and execution output already use this helper.
-The parent must apply it to Docker logs and errors because the existing Docker provider does not redact output.
+The daemon applies it to Docker logs, execution output, and errors.
 Keep specification values in private daemon state. Never print the full specification or write it into generated public configuration.
 `spec.compose.model` captures the resolved source configuration. It can contain private values.
 This snapshot preserves shell interpolation when the daemon has a different environment.
@@ -106,4 +106,4 @@ It also lets the daemon detect changes to commands, builds, health checks, and o
 `spec.compose.environment` contains private values needed for runtime secrets and redaction.
 
 Run `node test/compose.e2e.mjs` for the provider E2E. It creates and removes only its own resources.
-The existing package E2E continues to test the Docker CLI until the parent integrates Compose.
+Run `npm run test:features` for the integrated Compose CLI, snapshot, and worktree flow.

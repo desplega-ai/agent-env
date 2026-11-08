@@ -131,6 +131,21 @@ test('SSH uses pinned host identity, isolated credentials, and private files', a
   assert.doesNotMatch(JSON.stringify(result.cloud), /PRIVATE KEY|privateKey/);
 });
 
+test('resume recovers transient power-on failures and lost responses without replacement', async t => {
+  for (const after of [false, true]) {
+    const f = await setup(t);
+    const first = await f.manager.prepareCloud(spec());
+    await f.manager.commitCloud(first);
+    await f.manager.sleepCloud(first);
+    f.fail('server', 'poweron', after);
+    const resumed = await f.manager.prepareCloud(spec(), first);
+    assert.equal(resumed.cloud.serverId, first.cloud.serverId);
+    assert.equal(f.resources.server.length, 1);
+    assert.equal(f.calls.filter(call => call.args[1] === 'poweron').length, after ? 1 : 2);
+    await f.manager.destroyCloud(resumed);
+  }
+});
+
 test('lost server creation response reconciles without a second VPS', async t => {
   const f = await setup(t);
   f.fail('server', 'create', true);

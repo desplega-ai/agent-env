@@ -1,7 +1,7 @@
 # Snapshot and Git worktree helpers
 
 These modules provide storage and source helpers for the parent lifecycle code.
-They do not register CLI commands or change provider creation.
+The daemon integrates them with snapshot, restore, and fork commands.
 S3 stores backup archives. It does not store live database files.
 
 ## Snapshot API
@@ -57,13 +57,14 @@ The helper accepts these options:
 
 The Docker naming fallback checks existing destination containers through `provider.prefix(spec)` when available.
 Compose callers must supply `composeProject` or `destinationHandle` when destination containers already exist.
+Restore returns a unique `restoreId` for safe failure cleanup through `disposeRestoredVolumes`.
 Restore creates volumes only. It does not create containers, copy source files, or start services.
 The parent must attach the returned volumes before service creation.
 
 Without `volumeNames`, restore matches each saved service and mount target against `destinationSpec.services[service].volumes`.
 It calls `provider.volume(spec, service, key)` to obtain the destination name.
 Every saved mount of one source volume must resolve to the same destination name.
-Compose callers should supply an explicit map from volume IDs to their planned Compose volume names.
+The Compose provider resolves destination volume names and labels through its snapshot hooks.
 The parent must also preserve shared mounts within the same instance through that map.
 
 ```js
@@ -85,7 +86,7 @@ Volumes attached to any container outside the handle are shared, even when that 
 The helper rejects those volumes.
 Providers must not assign managed ownership labels to external volumes.
 
-The canonical `/workspace` bind mount is omitted when its source matches `handle.workspace` or `spec.cwd`.
+Bind mounts inside `handle.workspace` or `spec.cwd` are omitted as source files.
 Source files need a separate Git fork or synchronization operation.
 Other bind mounts, tmpfs mounts, external volumes, and shared volumes require separate backup procedures.
 `omitUnsupportedMounts: true` records each omission with its service, target, type, and reason.
@@ -213,8 +214,8 @@ They check binary restoration, source isolation, Compose volume discovery, archi
 S3 tests use a precise fake AWS CLI contract, including conditional writes and manifest publication order.
 SSH tests use a local fake SSH executable with the real Docker command helper and binary file descriptors.
 
-Live S3 integration remains required before production use with a chosen storage service.
+Live integration passed against a temporary SeaweedFS S3 server. Verify each production storage service separately.
 Test export and restore against a temporary bucket or a local S3-compatible server.
 Check the service's conditional write behavior and remove the test objects afterward.
-Live SSH integration also remains required against a configured remote Docker host.
+Live SSH snapshot and restore integration passed on a temporary Hetzner Docker host.
 These checks require actual endpoint credentials or an SSH host that the parent supplies.
