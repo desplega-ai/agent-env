@@ -42,8 +42,10 @@ try {
   await writeFile(join(cwd, 'index.html'), 'after');
   await until(async () => await readHttp() === 'after');
   if (host) {
+    const saved = JSON.parse(await readFile(join(home, 'state.json'), 'utf8'));
+    const backendPort = saved.instances.runtime.services.web.hostPort;
     const lines = (await run('ps', ['-axo', 'pid=,ppid=,command='])).split('\n');
-    const tunnels = lines.filter(line => line.includes(' -L ') && line.includes(host) && line.includes(home));
+    const tunnels = lines.filter(line => line.includes(' -L ') && line.includes(`:127.0.0.1:${backendPort} `) && line.trimEnd().endsWith(` -- ${host}`));
     assert.equal(tunnels.length, 1);
     process.kill(Number(tunnels[0].trim().split(/\s+/)[0]), 'SIGKILL');
     await delay(250);

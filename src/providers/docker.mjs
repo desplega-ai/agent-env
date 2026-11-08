@@ -4,14 +4,24 @@ import { run, quote, freePort, reachable, delay } from '../system.mjs';
 import { home } from '../paths.mjs';
 import { hash } from '../config.mjs';
 import { join } from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { sourceExclusions } from '../source-paths.mjs';
 
 // A provider owns compute and storage. The daemon owns names and local routing.
 export class DockerProvider {
   sessions = new Map();
   sshArgs(spec, multiplex = true) {
-    const control = join(home, `ssh-${hash(`${spec.host}:${spec.sshConfig ?? ''}`)}`);
-    if (multiplex) this.sessions.set(control, spec);
+    const filename = `ssh-${hash(`${spec.host}:${spec.sshConfig ?? ''}`)}`;
+    let control = join(home, filename);
+    if (multiplex) {
+      // Reserve space for OpenSSH's temporary suffix within the macOS socket path limit.
+      if (Buffer.byteLength(control) > 80) {
+        this.controlDirectory ??= mkdtempSync('/tmp/agent-env-ssh-');
+        control = join(this.controlDirectory, filename);
+      }
+      this.sessions.set(control, spec);
+    }
     const connection = multiplex
       ? ['-o', 'ControlMaster=auto', '-S', control, '-o', 'ControlPersist=60']
       : ['-o', 'ControlMaster=no', '-S', 'none', '-o', 'ControlPersist=no'];
@@ -154,6 +164,10 @@ export class DockerProvider {
     await Promise.all([...this.sessions.values()].map(spec =>
       run('ssh', [...this.sshArgs(spec), '-O', 'exit', '--', spec.host]).catch(() => {})));
     this.sessions.clear();
+    if (this.controlDirectory) {
+      await rm(this.controlDirectory, { recursive: true, force: true });
+      this.controlDirectory = undefined;
+    }
   }
   async status(handle) {
     return Object.fromEntries(await Promise.all(Object.entries(handle.services).map(async ([name, service]) => {

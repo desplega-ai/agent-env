@@ -6,9 +6,10 @@ import http from 'node:http';
 import { freePort, delay, createCli, targetOptions } from './helpers.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'agent-env-e2e-space '));
-const state = join(directory, '.agent-env');
-const webPort = await freePort(), dbPort = await freePort();
 const remote = process.env.AGENT_ENV_TEST_SSH;
+const stateRoot = join(directory, '.agent-env');
+const state = remote ? join(stateRoot, 'x'.repeat(Math.max(1, 87 - Buffer.byteLength(stateRoot)))) : stateRoot;
+const webPort = await freePort(), dbPort = await freePort();
 const options = [...targetOptions(), '--no-watch'];
 const config = {
   services: {
@@ -31,6 +32,10 @@ const execute = async (name, service, command) => JSON.parse((await invoke(['exe
 const sql = (name, query) => execute(name, 'db', ['psql', '-U', 'postgres', '-d', 'app', '-Atc', query]);
 try {
   console.log(`E2E target: ${remote ?? 'local Docker'}`);
+  if (remote) {
+    assert.ok(Buffer.byteLength(state) >= 88, 'Exercise SSH from a long private state path.');
+    assert.ok(Buffer.byteLength(join(state, 'control.sock')) < 104, 'Keep the daemon socket within the macOS path limit.');
+  }
   let started = Date.now();
   const first = await cli(['up', '--name', 'alpha', ...options]);
   console.log(`First stack ready: ${Date.now() - started} ms`);
