@@ -11,13 +11,13 @@ const tarball = resolve(destination, packed.filename);
 const files = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' }).trim().split('\n').sort();
 assert.deepEqual(files, packed.files.map(file => `package/${file.path}`).sort(), 'The archive and npm file lists differ.');
 for (const file of files) {
-  assert.match(file, /^package\/(?:package\.json|README\.md|LICENSE|(?:bin|src|docs|examples|assets)\/.+)$/);
+  assert.match(file, /^package\/(?:package\.json|README\.md|LICENSE|(?:bin|src|docs|examples|assets|skills)\/.+)$/);
   assert.ok(!file.split('/').some(part => part === '..' || part === '.git' || part === 'node_modules' || /^\.env(?:\.|$)/.test(part) && !part.endsWith('.example')), `Unsafe package file: ${file}`);
   assert.ok(!/\.(?:pem|key|tgz|log)$/.test(file), `Unsafe package file: ${file}`);
   assert.ok(!file.split('/').some(part => /^(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.envrc|\.npmrc|credentials)$/.test(part)), `Credential file: ${file}`);
   assert.ok(!file.endsWith('/VERIFICATION.md') && !file.startsWith('package/assets/concepts/'), `Unpublished development file: ${file}`);
 }
-for (const file of ['package/package.json', 'package/bin/agent-env.mjs', 'package/src/daemon.mjs', 'package/README.md', 'package/LICENSE']) {
+for (const file of ['package/package.json', 'package/bin/agent-env.mjs', 'package/src/daemon.mjs', 'package/README.md', 'package/LICENSE', 'package/skills/agent-env/SKILL.md', 'package/skills/agent-env/references/remote-and-data.md']) {
   assert.ok(files.includes(file), `The package lacks ${file}.`);
 }
 const metadata = JSON.parse(execFileSync('tar', ['-xOf', tarball, 'package/package.json'], { encoding: 'utf8' }));

@@ -19,11 +19,14 @@ The `CI` job requires all these jobs to succeed:
 
 | Job | Runtime | Real dependencies |
 | --- | --- | --- |
-| Core | Linux and macOS, Node 22 and latest LTS | Git, public CLI |
+| Core | Linux and macOS, Node 22 and latest LTS | Git, npm, public skills installer, public CLI |
 | Docker | Linux, latest Node LTS | Docker, HTTP, TCP, TLS, sandbox bridge |
 | Compose | Linux, latest Node LTS | Docker Compose |
 | SSH | Linux, latest Node LTS | Dedicated localhost sshd, Docker, Compose, rsync |
 | S3 | Linux, latest Node LTS | Docker Compose, AWS CLI, disposable SeaweedFS |
+
+Core tests install the bundled skill with the real skills installer into a temporary project.
+They verify Codex and Claude Code files and remove the isolated npm cache afterward.
 
 The SSH fixture generates new client and host keys for every job.
 The client pins the generated host key and requires strict host verification.
