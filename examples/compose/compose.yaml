@@ -1,0 +1,36 @@
+services:
+  web:
+    build: .
+    container_name: existing-web-name
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD through dev-now env or an explicit env file}
+    volumes:
+      - data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  tools:
+    image: busybox:1.37
+    profiles: [tools]
+    command: ["sh", "-c", "while :; do sleep 3600; done"]
+volumes:
+  data:
+    name: existing-shared-data-name
