@@ -20,7 +20,17 @@ npm install -g @desplega.ai/agent-env
 
 For a source checkout, run `npm link --ignore-scripts --no-audit --no-fund` in this repository instead.
 
-Install the [agent skill](https://github.com/desplega-ai/agent-env/blob/master/skills/agent-env/SKILL.md) into a project:
+Read the bundled [agent skill](https://github.com/desplega-ai/agent-env/blob/master/skills/agent-env/SKILL.md) or install it into a project:
+
+```sh
+agent-env skill
+agent-env skill install
+agent-env skill install --agent codex --yes
+```
+
+`skill` prints the complete guide offline. Add `--json` for structured output.
+`skill install` runs the skills installer with files bundled in your CLI version.
+To install the latest guide directly from GitHub instead:
 
 ```sh
 npx skills add desplega-ai/agent-env --skill agent-env

@@ -7,8 +7,10 @@ license: MIT
 # agent-env
 
 Use the `agent-env` CLI to run development services behind stable localhost addresses.
-These instructions describe CLI version 0.3.0.
+These instructions describe CLI version 0.4.0.
 Check `agent-env --help` when the installed version differs from these instructions.
+Run `agent-env skill` to read this guide and its reference offline.
+Run `agent-env skill install` to install the bundled skill for your coding agent.
 
 ## Prepare the project
 

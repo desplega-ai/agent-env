@@ -12,10 +12,12 @@ import { initialize } from '../src/init.mjs';
 import { addService } from '../src/goodies.mjs';
 import { setEnvironmentSecret, listEnvironmentSecrets, unsetEnvironmentSecret } from '../src/environments.mjs';
 import { delay } from '../src/system.mjs';
+import { skillCommand } from '../src/skill.mjs';
 
 const help = `agent-env: development services with stable localhost addresses
 
   agent-env init                       Create agent-env.json
+  agent-env skill [install]            Read or install the bundled agent skill
   agent-env add postgres | redis       Add a persistent service
   agent-env up [--ssh user@host]        Start the configured stack
   agent-env up NAME                    Resume the saved instance from any directory
@@ -125,6 +127,7 @@ async function main() {
   const separator = args.indexOf('--');
   const command = separator < 0 ? [] : args.splice(separator).slice(1);
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
+    agent: { type: 'string', multiple: true }, global: { type: 'boolean', short: 'g' }, yes: { type: 'boolean', short: 'y' },
     'env-file': { type: 'string', multiple: true }, 'no-env-file': { type: 'boolean' }, 'from-env': { type: 'string' },
     version: { type: 'boolean', short: 'v' },
     timeout: { type: 'string' },
@@ -143,6 +146,7 @@ async function main() {
     console.log(values.json ? JSON.stringify({ version }) : version);
     return;
   }
+  if (type === 'skill') { await skillCommand(positionals.slice(1), values, command); return; }
   if (!type || values.help || type === 'help') { console.log(help); return; }
   if (type === 'trust') { display(await trustTls(), values.json); return; }
   if (type === 'add') { display(await addService(name, { config: values.config, port: values.port, environment: values.env }), values.json); return; }
