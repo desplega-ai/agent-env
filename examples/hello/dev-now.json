@@ -1,0 +1,20 @@
+{
+  "services": {
+    "web": {
+      "image": "busybox:1.37",
+      "port": 3300,
+      "command": "httpd -f -p 3000 -h /workspace",
+      "containerPort": 3000,
+      "volumes": { "data": "/data" }
+    },
+    "db": {
+      "image": "postgres:16-alpine",
+      "port": 55432,
+      "containerPort": 5432,
+      "protocol": "tcp",
+      "health": "pg_isready -U postgres",
+      "env": { "POSTGRES_PASSWORD": "dev-only", "POSTGRES_DB": "app" },
+      "volumes": { "data": "/var/lib/postgresql/data" }
+    }
+  }
+}
