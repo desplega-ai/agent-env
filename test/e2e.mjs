@@ -1,9 +1,9 @@
 import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import http from 'node:http';
-import { freePort, delay, createCli, targetOptions } from './helpers.mjs';
+import { freePort, delay, createCli, targetOptions, until } from './helpers.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'agent-env-e2e-space '));
 const remote = process.env.AGENT_ENV_TEST_SSH;
@@ -19,6 +19,10 @@ const config = {
 };
 await writeFile(join(directory, 'agent-env.json'), JSON.stringify(config));
 await writeFile(join(directory, 'index.html'), 'version-one');
+const syncFile = join(directory, 'sync-check.txt');
+const syncTime = new Date('2020-01-01T00:00:00Z');
+await writeFile(syncFile, 'sync-one');
+await utimes(syncFile, syncTime, syncTime);
 await writeFile(join(directory, '.env'), 'TEST_SECRET=do-not-sync');
 const { invoke, cli } = createCli(directory, state);
 const get = (host, headers = {}) => new Promise((resolveResult, reject) => {
@@ -56,8 +60,12 @@ try {
   assert.equal((await get('missing.localhost')).status, 404);
   assert.equal((await get('attacker.example')).status, 403);
   await writeFile(join(directory, 'index.html'), 'version-two');
+  await writeFile(syncFile, 'sync-two');
+  await utimes(syncFile, syncTime, syncTime);
   await cli(['sync', 'alpha']);
-  assert.equal((await get('alpha.localhost')).body, 'version-two');
+  // Wait for the container's bind mount to expose the synchronized source.
+  await until(async () => (await get('alpha.localhost')).body === 'version-two');
+  assert.equal(await execute('alpha', 'web', ['cat', '/workspace/sync-check.txt']), 'sync-two');
   if (remote) assert.equal((await get('localhost')).body, 'version-one');
   await invoke(['daemon', 'stop']);
   await delay(1200);

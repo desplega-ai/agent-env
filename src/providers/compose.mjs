@@ -4,7 +4,7 @@ import { DockerProvider } from './docker.mjs';
 import { hash, validate } from '../config.mjs';
 import { credentialValues, redactEnvironment, sensitiveValuesForSpec } from '../environments.mjs';
 import { home } from '../paths.mjs';
-import { quote, run } from '../system.mjs';
+import { run } from '../system.mjs';
 import { shouldSync } from '../source-paths.mjs';
 
 export async function detectComposeFiles(cwd) {
@@ -360,7 +360,7 @@ export class ComposeProvider extends DockerProvider {
         await this.command(spec, ['mkdir', '-p', remoteDirectory]);
         await this.command(spec, ['chmod', '700', remoteDirectory]);
         for (const asset of [...prepared.assets, { local: prepared.localFile, remote: handle.runtimeFile }]) {
-          await run('rsync', ['-az', '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), asset.local, `${spec.host}:${quote(asset.remote)}`]);
+          await this.transfer(spec, asset.local, asset.remote);
           await this.command(spec, ['chmod', '600', asset.remote]);
         }
       }

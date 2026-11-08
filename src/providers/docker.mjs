@@ -38,11 +38,18 @@ export class DockerProvider {
   }
   prefix(spec) { return `agent-env-${spec.owner}-${spec.name}`; }
   volume(spec, service, name) { return `${this.prefix(spec)}-${service}-${name}`; }
+  transfer(spec, source, destination, options = []) {
+    // We quote remote paths for older rsync. Prevent modern rsync from quoting them again.
+    return run('rsync', ['-az', ...options, '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), source, `${spec.host}:${quote(destination)}`], {
+      env: { ...process.env, RSYNC_OLD_ARGS: '1', RSYNC_PROTECT_ARGS: '0' },
+    });
+  }
   async sync(handle) {
     const { spec, workspace } = handle;
     if (!spec.host) return;
     await this.command(spec, ['mkdir', '-p', workspace]);
-    await run('rsync', ['-az', '--delete', ...sourceExclusions.map(rule => `--exclude=${rule}`), '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), `${spec.cwd}/`, `${spec.host}:${quote(`${workspace}/`)}`]);
+    // Rapid edits can keep the same size and timestamp. Compare file contents.
+    await this.transfer(spec, `${spec.cwd}/`, `${workspace}/`, ['--checksum', '--delete', ...sourceExclusions.map(rule => `--exclude=${rule}`)]);
   }
   async create(spec) {
     await this.docker(spec, ['info', '--format', '{{.ServerVersion}}']);

@@ -33,6 +33,8 @@ try {
     labels: {agent-env.e2e: "${token}"}
     ports: ["${port}:3000"]
     volumes: [".:/workspace"]
+    secrets: [test_token]
+    configs: [test_settings]
     command: [httpd, -f, -p, "3000", -h, /workspace]
     depends_on:
       db: {condition: service_healthy}
@@ -55,10 +57,18 @@ try {
     command: [sleep, "3600"]
 volumes:
   data: {}
+secrets:
+  test_token:
+    file: .env.compose secret
+configs:
+  test_settings:
+    file: .env.compose config
 `;
   await writeFile(join(cwd, 'compose.yaml'), source);
   await writeFile(join(cwd, 'Dockerfile'), 'FROM busybox:1.37\n');
   await writeFile(join(cwd, 'index.html'), 'Compose public CLI');
+  await writeFile(join(cwd, '.env.compose secret'), 'compose-file-private-value');
+  await writeFile(join(cwd, '.env.compose config'), 'compose-file-settings');
   await writeFile(join(cwd, 'agent-env.json'), JSON.stringify({ provider: 'compose', env: { POSTGRES_PASSWORD: { secret: 'POSTGRES_PASSWORD' } } }));
   await cli(['env', 'set', 'POSTGRES_PASSWORD', '--from-env', 'AGENT_ENV_E2E_PASSWORD']);
   const first = await up('alpha', 'compose.yaml');
@@ -68,6 +78,11 @@ volumes:
   assert.equal(second.services.tools.url, null);
   assert.equal((await requestHttp(`http://127.0.0.1:${port}`, { headers: { host: `alpha.localhost:${port}` } })).status, 200);
   assert.equal((await requestHttp(`http://127.0.0.1:${port}`, { headers: { host: `beta.localhost:${port}` } })).body, 'Compose public CLI');
+  assert.equal(await exec('alpha', 'web', ['cat', '/run/secrets/test_token']), '[redacted]');
+  assert.equal(await exec('alpha', 'web', ['cat', '/test_settings']), 'compose-file-settings');
+  if (process.env.AGENT_ENV_TEST_SSH) {
+    await exec('alpha', 'web', ['sh', '-c', 'test ! -e "/workspace/.env.compose secret" && test ! -e "/workspace/.env.compose config"']);
+  }
   const infos = await containers();
   const network = Object.keys(infos.find(info => Object.keys(info.NetworkSettings.Networks).length).NetworkSettings.Networks)[0];
   owner = JSON.parse(await docker(['network', 'inspect', network]))[0].Labels['agent-env.owner'];

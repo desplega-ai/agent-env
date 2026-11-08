@@ -10,7 +10,7 @@ fi
 
 if [[ "$fixture_group" == ssh ]]; then
   [[ "$(uname -s)" == Linux ]] || { echo 'The SSH fixture requires Linux.' >&2; return 1; }
-  mkdir -p "$fixture_root/ssh/workspace"
+  mkdir -p "$fixture_root/ssh/workspace with spaces"
   ssh-keygen -q -t ed25519 -N '' -f "$fixture_root/ssh/client"
   ssh-keygen -q -t ed25519 -N '' -f "$fixture_root/ssh/host"
   cp "$fixture_root/ssh/client.pub" "$fixture_root/ssh/authorized_keys"
@@ -21,7 +21,7 @@ if [[ "$fixture_group" == ssh ]]; then
 #!/usr/bin/env bash
 set -euo pipefail
 export PATH='$PATH'
-cd '$fixture_root/ssh/workspace'
+cd '$fixture_root/ssh/workspace with spaces'
 exec /bin/bash -c "\$SSH_ORIGINAL_COMMAND"
 EOF
   chmod 700 "$fixture_root/ssh/command"
