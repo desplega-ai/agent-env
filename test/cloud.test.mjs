@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, writeFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile, readdir, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createCloudManager, cloudOptions, cloudInit } from '../src/cloud.mjs';
@@ -13,7 +13,8 @@ async function setup(t, settings = {}) {
   const resources = { server: [], 'primary-ip': [], 'ssh-key': [] };
   const calls = [];
   let nextId = 100, failure, clock = 0, sshFailures = 0;
-  const runner = async (binary, args) => {
+  const auth = { context: 'project-a', endpoint: 'https://api.hetzner.cloud/v1', token: 'test-token-project-a' };
+  const runner = async (binary, args, options) => {
     calls.push({ binary, args });
     if (binary === 'ssh-keygen') return realRun(binary, args);
     if (binary === 'ssh') {
@@ -21,6 +22,9 @@ async function setup(t, settings = {}) {
       return '';
     }
     assert.equal(binary, 'hcloud');
+    if (args[0] === 'config') return auth[args[2]];
+    assert.equal(options.env.HCLOUD_TOKEN, auth.token);
+    assert.equal(options.env.HCLOUD_CONTEXT, auth.context);
     const [kind, action] = args;
     const value = flag => args[args.indexOf(flag) + 1];
     const list = resources[kind];
@@ -72,7 +76,7 @@ async function setup(t, settings = {}) {
   };
   const options = { home, run: runner, now: () => clock, delay: async ms => { clock += ms; }, readinessTimeoutMs: 2000, ...settings };
   return {
-    home, resources, calls, manager: createCloudManager(options), restart: () => createCloudManager(options),
+    home, resources, calls, auth, manager: createCloudManager(options), restart: () => createCloudManager(options),
     fail(kind, action, after = false) { failure = { kind, action, after }; },
     failSSH(count) { sshFailures = count; },
     async record() {
@@ -248,8 +252,37 @@ test('missing committed server cannot silently create another VPS', async t => {
   await f.manager.commitCloud(result);
   f.resources.server.length = 0;
   assert.equal((await f.manager.cloudStatus(result)).status, 'missing');
-  await assert.rejects(f.restart().prepareCloud(spec()), /missing resource/);
+  await assert.rejects(f.restart().prepareCloud(spec()), /rm demo --purge/);
   assert.equal(f.calls.filter(call => call.args[0] === 'server' && call.args[1] === 'create').length, 1);
+});
+
+test('changed cloud context, endpoint, or token preserves resources and local recovery keys', async t => {
+  const f = await setup(t);
+  const prepared = await f.manager.prepareCloud(spec());
+  const { directory, data } = await f.record();
+  const identity = await readFile(join(directory, 'identity'));
+  assert.ok(data.authentication.fingerprint);
+  assert.ok(!JSON.stringify(data).includes(f.auth.token));
+  const methods = [() => f.manager.prepareCloud(spec()), ...['sleepCloud', 'destroyCloud', 'cloudStatus', 'commitCloud', 'disposeFailedCloud'].map(method => () => f.manager[method](prepared))];
+  for (const field of ['context', 'endpoint', 'token']) {
+    const original = f.auth[field];
+    f.auth[field] += '-other-project';
+    const calls = f.calls.length;
+    for (const invoke of methods) await assert.rejects(invoke(), /differs from this cloud record/);
+    assert.ok(f.calls.slice(calls).every(call => call.binary !== 'hcloud' || call.args[0] === 'config'));
+    assert.deepEqual(Object.values(f.resources).map(resources => resources.length), [1, 1, 1]);
+    assert.deepEqual(await readFile(join(directory, 'identity')), identity);
+    assert.deepEqual((await f.record()).data, data);
+    f.auth[field] = original;
+  }
+  const legacy = { ...data };
+  delete legacy.authentication;
+  await writeFile(join(directory, 'record.json'), JSON.stringify(legacy));
+  await assert.rejects(f.manager.destroyCloud(prepared), /no credential binding/);
+  assert.deepEqual(await readFile(join(directory, 'identity')), identity);
+  await writeFile(join(directory, 'record.json'), JSON.stringify(data));
+  await f.manager.destroyCloud(prepared);
+  assert.deepEqual(Object.values(f.resources).map(resources => resources.length), [0, 0, 0]);
 });
 
 test('validation prevents external commands for invalid options, foreign handles, and elapsed expiry', async t => {
@@ -271,15 +304,21 @@ test('concurrent prepare calls do not allocate duplicate infrastructure', async 
   assert.equal(f.resources.server.length, 1);
 });
 
-test('restart recovers a dead process lock and refuses malformed locks', async t => {
+test('restart recovers dead owners and old empty locks while protecting fresh locks', async t => {
   const f = await setup(t);
   const prepared = await f.manager.prepareCloud(spec());
   const { directory } = await f.record();
   const lock = `${directory}.lock`;
   await writeFile(lock, '2147483647');
+  await writeFile(`${lock}.recovery`, '2147483647');
   const recovered = await f.restart().prepareCloud(spec());
   assert.equal(recovered.cloud.serverId, prepared.cloud.serverId);
   await writeFile(lock, '');
+  await assert.rejects(f.restart().prepareCloud(spec()), /locked/);
+  const old = new Date(Date.now() - 10000);
+  await utimes(lock, old, old);
+  assert.equal((await f.restart().prepareCloud(spec())).cloud.serverId, prepared.cloud.serverId);
+  await writeFile(lock, 'invalid-owner');
   await assert.rejects(f.restart().prepareCloud(spec()), /locked/);
   await rm(lock);
   await f.manager.disposeFailedCloud(prepared);

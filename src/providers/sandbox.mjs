@@ -3,7 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DockerProvider } from './docker.mjs';
 
 export const SANDBOX_OPERATIONS = Object.freeze(['create', 'start', 'wait', 'connect', 'stop', 'remove', 'status', 'sync', 'logs', 'exec', 'fork']);
-export const SANDBOX_CAPABILITIES = Object.freeze([...SANDBOX_OPERATIONS, 'compose', 'snapshots']);
+export const SANDBOX_CAPABILITIES = Object.freeze([...SANDBOX_OPERATIONS, 'compose']);
 const required = ['create', 'wait', 'connect', 'status'];
 
 export function validateSandboxAdapter(adapter) {

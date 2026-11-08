@@ -35,6 +35,8 @@ test('fork copies tracked edits, additions, deletions, and safe untracked bytes 
   await git('add', 'added.txt');
   await mkdir(join(cwd, 'src'));
   await writeFile(join(cwd, 'src', 'new.txt'), 'untracked\n');
+  await mkdir(join(cwd, 'src/build'));
+  await writeFile(join(cwd, 'src/build/source.txt'), 'nested source');
   await chmod(join(cwd, 'src', 'new.txt'), 0o755);
   for (const name of ['.env', '.env.production', 'secret.key', '.npmrc', 'ignored.txt']) await writeFile(join(cwd, name), 'sensitive');
   await mkdir(join(cwd, 'node_modules'));
@@ -47,6 +49,7 @@ test('fork copies tracked edits, additions, deletions, and safe untracked bytes 
   assert.equal(await readFile(join(result.cwd, 'added.txt'), 'utf8'), 'staged addition');
   await assert.rejects(lstat(join(result.cwd, 'remove.txt')), { code: 'ENOENT' });
   assert.equal(await readFile(join(result.cwd, 'src', 'new.txt'), 'utf8'), 'untracked\n');
+  assert.equal(await readFile(join(result.cwd, 'src/build/source.txt'), 'utf8'), 'nested source');
   assert.ok((await lstat(join(result.cwd, 'src', 'new.txt'))).mode & 0o111);
   for (const name of ['.env', '.env.production', 'secret.key', '.npmrc', 'ignored.txt', 'node_modules', 'outside-link']) await assert.rejects(lstat(join(result.cwd, name)), { code: 'ENOENT' });
   assert.ok(result.omittedPaths.includes('.env'));

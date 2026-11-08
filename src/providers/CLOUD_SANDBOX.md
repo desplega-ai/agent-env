@@ -95,6 +95,11 @@ Directories use mode `0700`.
 Records, private keys, SSH config, and known hosts use mode `0600`.
 Public keys remain inside the private directory.
 Cloud home paths cannot contain newlines, null bytes, or SSH percent tokens.
+Records contain the context, endpoint, and a credential fingerprint. They never contain the API token.
+Every API operation checks this binding and passes the checked credential directly through the child environment.
+A context, endpoint, or credential change stops the operation before resource access.
+Older records without a binding require manual recovery. The module preserves their SSH keys and ownership data.
+Locks publish complete owner files atomically. Recovery supports dead owners and stale empty locks from older builds.
 
 Each remote resource has these labels:
 
@@ -107,7 +112,7 @@ It reconciles remote resources by token, name, labels, and stored ID after resta
 It refuses multiple matches, changed ownership, or conflicting IDs.
 A missing recorded resource never causes automatic replacement.
 An ambiguous creation with no visible resource also blocks replacement.
-Dispose that failed start before a new allocation.
+Use `dev-now rm NAME --purge` before a new allocation.
 
 Purge checks every resource before its first deletion.
 It refuses a foreign IP assignment or an untracked primary IPv6 address.
@@ -185,7 +190,7 @@ export function createAdapter(options) {
       create: true, start: true, wait: true, connect: true,
       stop: true, remove: true, status: true, sync: true,
       logs: true, exec: true, fork: false,
-      compose: false, snapshots: false,
+      compose: false,
     },
     // Implement each operation whose capability is true.
     // Use the signatures in src/providers/README.md.
@@ -197,14 +202,14 @@ export function createAdapter(options) {
 Other operations can be false and omit their methods.
 The wrapper rejects unsupported operations before it calls the adapter.
 It also checks `sandbox.requireCapabilities` and rejects Compose specs when `compose` is false.
-`compose` and `snapshots` describe feature support beyond the base lifecycle methods.
-They do not add snapshot methods to the existing provider contract.
+`compose` describes configuration support beyond the base lifecycle methods.
+Sandbox snapshots have no provider contract yet, so adapters cannot request or advertise that capability.
 The adapter must clean partial allocation when its `create` method rejects.
 The wrapper attempts purge if an adapter returns an invalid handle and supports `remove`.
 
 The built-in `docker` adapter delegates to the existing Docker provider.
 It supports the existing local and SSH lifecycle, named volumes, synchronization, logs, exec, and fork behavior.
-It declares `compose: false` and `snapshots: false` for the current Docker implementation.
+It declares `compose: false`. The daemon snapshot commands require the Docker or Compose provider.
 It provides container isolation at the Docker host's trust boundary.
 It implements neither Firecracker nor a hosted sandbox vendor.
 It needs no hosted credentials.

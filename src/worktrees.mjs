@@ -4,6 +4,7 @@ import { mkdir, realpath, lstat, open, readFile, writeFile, rm, rmdir } from 'no
 import { pipeline } from 'node:stream/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { shouldSync, worktreeExclusions } from './source-paths.mjs';
 
 async function git(cwd, args, input) {
   return new Promise((resolveResult, reject) => {
@@ -32,7 +33,7 @@ function credential(path) {
 }
 
 function excluded(path) {
-  return credential(path) || path.split('/').some(part => /^(?:\.git|\.dev-now|node_modules|vendor|dist|build|target|coverage|\.next|\.nuxt|\.cache|\.turbo|\.venv|venv|__pycache__)$/i.test(part));
+  return credential(path) || !shouldSync(path, worktreeExclusions);
 }
 
 async function absent(path) {

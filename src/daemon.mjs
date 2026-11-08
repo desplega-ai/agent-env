@@ -10,9 +10,9 @@ import { home, socketPath, statePath } from './paths.mjs';
 import { hash, validName, validate } from './config.mjs';
 import { providerFor, disposeProviders } from './providers/index.mjs';
 import { RuntimeExtras, redact } from './runtime.mjs';
-import { prepareCloud, sleepCloud, destroyCloud, commitCloud, disposeFailedCloud } from './cloud.mjs';
+import { prepareCloud, sleepCloud, destroyCloud, commitCloud, disposeFailedCloud, cloudOptions } from './cloud.mjs';
 import { createProxy, createTcpProxy } from './proxy.mjs';
-import { cloudPeers, cloudCanSleep, maintainInstances } from './maintenance.mjs';
+import { cloudPeers, cloudCanSleep, maintainInstances, expireCloudMachine } from './maintenance.mjs';
 
 await mkdir(home, { recursive: true, mode: 0o700 });
 await chmod(home, 0o700);
@@ -139,7 +139,7 @@ async function wakeForStorage(handle) {
   if (!handle.sleeping || !handle.spec.cloud) return;
   const prepared = await prepareCloud({ ...handle.spec, name: handle.spec.cloud.name }, handle);
   handle.spec = { ...prepared, name: handle.spec.name };
-  for (const peer of Object.values(state.instances)) if (peer.spec.cloud?.recordId === handle.spec.cloud.recordId) peer.sleeping = false;
+  for (const peer of cloudPeers(handle, state.instances)) { peer.sleeping = false; peer.spec.cloud = { ...handle.spec.cloud }; }
 }
 async function sleepUnusedCloud(handle) {
   const cloud = handle.spec.cloud;
@@ -155,6 +155,13 @@ function storageOptions(message) {
 async function action(message) {
   const { name, type } = message;
   if (type === 'resume') return action({ type: 'up', spec: structuredClone(instance(name).spec) });
+  if (type === 'expire') {
+    const handle = instance(name);
+    if (!handle.spec.cloud?.expiresAt || Date.parse(handle.spec.cloud.expiresAt) > Date.now()) throw new Error('This cloud machine has not expired.');
+    await expireCloudMachine(handle, { instances: state.instances, destroy: destroyCloud, disconnect, save,
+      forget: peer => { errors.delete(peer.spec.name); retries.delete(peer.spec.name); } });
+    return { message: 'Expired cloud machine and its instances removed.' };
+  }
   if (type === 'up' || type === 'restore') {
     let spec = validate({ ...message.spec, owner });
     const provider = providerFor(spec);
@@ -162,7 +169,15 @@ async function action(message) {
     if (type === 'restore' && handle) throw new Error('Restore requires a new instance name.');
     if (type === 'restore' && !provider.docker) throw new Error('This provider does not support volume snapshots.');
     let restored;
-    const identitySpec = value => { const copy = structuredClone(value); if (copy.cloud) { delete copy.host; delete copy.sshConfig; copy.cloud = { provider: 'hetzner', type: copy.cloud.type ?? 'cx23', location: copy.cloud.location ?? 'fsn1', image: copy.cloud.image ?? 'ubuntu-24.04' }; } return copy; };
+    const identitySpec = value => {
+      const copy = structuredClone(value);
+      if (copy.cloud) {
+        delete copy.host; delete copy.sshConfig;
+        const { idleTimeoutMs, expiresAt, ...identity } = cloudOptions(copy.cloud);
+        copy.cloud = identity;
+      }
+      return copy;
+    };
     if (handle && !handle.removed && !isDeepStrictEqual(identitySpec(handle.spec), identitySpec(spec))) {
       throw new Error(`Configuration changed for ${spec.name}. Run dev-now rm ${spec.name}, then up. Volumes remain.`);
     }
@@ -173,7 +188,7 @@ async function action(message) {
         const prepared = await prepareCloud({ ...spec, name: cloudName }, handle);
         spec = { ...prepared, name: spec.name };
         if (handle) handle.spec = spec;
-        for (const peer of Object.values(state.instances)) if (peer.spec.cloud?.recordId === spec.cloud.recordId) {
+        for (const peer of cloudPeers({ spec }, state.instances)) {
           peer.sleeping = false;
           peer.spec.cloud = { ...spec.cloud };
         }
@@ -185,7 +200,9 @@ async function action(message) {
         await provider.start(handle);
       } else {
         if (type === 'restore') restored = await restoreSnapshot(spec, message.location, provider, storageOptions(message));
+        const worktree = handle?.worktree;
         handle = await provider.create(spec);
+        if (worktree) handle.worktree = worktree;
         state.instances[spec.name] = handle;
       }
       handle.running = true;
@@ -245,19 +262,23 @@ async function action(message) {
   if (type === 'down' || type === 'rm') {
     const handles = message.all ? Object.values(state.instances) : [instance(name)];
     for (const handle of handles) {
+      if (state.instances[handle.spec.name] !== handle) continue;
       const provider = providerFor(handle.spec);
       const cloud = handle.spec.cloud;
-      const peers = () => Object.values(state.instances).filter(other => other !== handle && cloud && other.spec.cloud?.recordId === cloud.recordId);
+      const peers = () => cloudPeers(handle, state.instances).filter(other => other !== handle);
       if (type === 'rm' && message.removeWorktree && handle.worktree) await removeOwnedWorktree(handle.worktree, { checkOnly: true, dirty: message.discardWorktree ? 'discard' : undefined });
+      if (type === 'rm' && message.purge && cloud?.expiresAt && Date.parse(cloud.expiresAt) <= Date.now()) {
+        await action({ type: 'expire', name: handle.spec.name });
+        if (message.removeWorktree && handle.worktree) await removeOwnedWorktree(handle.worktree, { dirty: message.discardWorktree ? 'discard' : undefined });
+        continue;
+      }
       extras.unwatch(handle.spec.name);
       if (type === 'rm' && cloud && message.purge && !peers().length) {
         await disconnect(handle.spec.name);
         await destroyCloud(handle);
       } else {
         if (handle.sleeping && type === 'rm') {
-          const prepared = await prepareCloud({ ...handle.spec, name: cloud.name }, handle);
-          handle.spec = { ...prepared, name: handle.spec.name };
-          for (const peer of Object.values(state.instances)) if (peer.spec.cloud?.recordId === cloud.recordId) peer.sleeping = false;
+          await wakeForStorage(handle);
         }
         if (!handle.sleeping) {
           if (type === 'rm') { if (!handle.removed || message.purge) await provider.remove(handle, message.purge); }

@@ -1,13 +1,7 @@
 import { watch, existsSync } from 'node:fs';
 import { resolve, sep, basename } from 'node:path';
-
-const excluded = new Set(['.git', 'node_modules', '.dev-now', '.next', 'dist', 'build', 'coverage', '.cache']);
-export function shouldSync(file, exclusions = []) {
-  if (!file) return true;
-  const parts = String(file).split(/[\\/]/);
-  return !parts.some(part => excluded.has(part) || part === '.env' || part.startsWith('.env.')) &&
-    !exclusions.some(prefix => String(file) === prefix || String(file).startsWith(`${prefix}/`));
-}
+import { shouldSync } from './source-paths.mjs';
+export { shouldSync } from './source-paths.mjs';
 // The caller serializes synchronization with lifecycle changes.
 export function watchSource(cwd, { changed, error = () => {}, debounceMs = 350, exclusions = [], stateDirectory } = {}) {
   let timer;

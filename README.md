@@ -52,6 +52,8 @@ Use an SSH alias or `--ssh-config FILE` for keys and ports. Existing SSH hosts r
 Remote source synchronization starts automatically and follows file edits. Use `--no-watch` for manual synchronization.
 `dev-now sync remote` synchronizes immediately. The daemon reconnects failed SSH tunnels with bounded retry intervals.
 Synchronization excludes Git metadata, dependencies, common build directories, `.dev-now`, and `.env*` files.
+Generated directories such as `build` and `dist` are excluded at the checkout root. Nested source paths such as `src/build` remain available.
+Remote Compose validates bind mounts, build contexts, and Dockerfiles against the same rules.
 Keep other credentials outside the source tree. Explicit Compose secret files use a separate private transfer.
 
 ## Compose
@@ -157,6 +159,9 @@ dev-now rm cloud --purge
 
 The CLI provisions Docker and Compose, generates dedicated SSH credentials, and pins the host identity before connecting.
 Ownership records and labels protect unrelated machines, keys, and IP addresses.
+Each record also binds to the active hcloud context, API endpoint, and a fingerprint of its credential.
+Changed settings stop cloud operations before resource access. Local keys and ownership records remain available for recovery.
+Older records without this binding require manual recovery in Hetzner. The CLI preserves their local keys.
 `down` stops containers and powers off an otherwise unused owned machine. Its disk remains available for resume.
 Powered-off Hetzner machines still incur charges. `rm --purge` deletes the last instance's owned machine, IP, key, and data.
 A plain `rm` retains the cloud record so `list`, resume, and later purge remain available.
@@ -167,8 +172,11 @@ Machine and lifecycle flags require `--cloud hetzner` or a configured cloud prov
 An explicit `--ssh` or `--local` target overrides a configured cloud target.
 HTTP requests, WebSocket traffic, TCP traffic, source synchronization, and explicit service commands record activity.
 Use `--ttl-hours N` for an explicit destructive expiry.
+Expiry deletes the shared machine and every instance on it, including sleeping forks. It does not wake the machine.
+Failed idle and expiry actions use bounded retry delays.
 **Idle shutdown and expiry require the local daemon to remain running and connected.** They are not cloud-side schedules.
-Keep the same `hcloud` context for a machine's lifecycle.
+Keep the same `hcloud` context and credential for a machine's lifecycle.
+The CLI reads effective settings through [hcloud config](https://github.com/hetznercloud/cli/blob/main/docs/reference/manual/hcloud_config_get.md).
 
 ## Forks and snapshots
 
@@ -205,6 +213,7 @@ dev-now restore s3://my-bucket/checkpoint --name restored --ssh my-host
 Restore uses the current project's configuration and creates fresh volumes before starting services.
 It verifies archive hashes and extraction paths. It refuses existing destination volumes.
 Snapshots contain named volume data. Source files require Git or another backup procedure.
+Compose anonymous volumes require a separate backup or explicit omission. Snapshot export rejects them before archive creation.
 Unsupported or shared mounts cause an error. `--omit-mounts` explicitly excludes them and reports each omission.
 
 S3 uses the installed AWS CLI and its normal credentials. `--endpoint URL` selects compatible storage.
@@ -227,6 +236,7 @@ Other HTTP services use `https://app--SERVICE.localhost:8443`.
 `up --https` enables the proxy during startup.
 
 `trust` explicitly installs the CA in the macOS user keychain or a Debian-based Linux trust store.
+Certificate generation uses a process lock. New certificate authorities restrict signing to localhost names and loopback addresses.
 Linux trust installation requires sudo permission. Some browsers and runtimes maintain separate trust stores.
 For curl without OS trust installation:
 
@@ -279,7 +289,10 @@ npm run test:e2e
 npm run test:runtime
 npm run test:features
 DEV_NOW_TEST_SSH=my-host DEV_NOW_TEST_SSH_CONFIG=/path/to/config npm run test:features
+# Creates and deletes one billed Hetzner machine:
+DEV_NOW_TEST_CLOUD=1 npm run test:cloud
 ```
 
 Tests create isolated resources and remove them afterward. SSH tests use an existing host without provisioning or deleting it.
+The explicit cloud test provisions a temporary machine and verifies credential protection, source sync, fork recreation, sleeping expiry, and resource deletion.
 See [verification evidence](VERIFICATION.md) for completed local, remote, S3, cloud, and UI checks.

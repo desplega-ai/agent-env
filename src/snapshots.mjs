@@ -26,8 +26,8 @@ function aws(options, args) {
   ], { env: { ...process.env, ...options.awsEnv, AWS_PAGER: '' } });
 }
 
-async function allContainers(provider, spec) {
-  const ids = (await provider.docker(spec, ['container', 'ls', '-aq'])).split(/\s+/).filter(Boolean);
+async function matchingContainers(provider, spec, filter) {
+  const ids = (await provider.docker(spec, ['container', 'ls', '-aq', '--filter', filter])).split(/\s+/).filter(Boolean);
   if (!ids.length) return [];
   try { return JSON.parse(await provider.docker(spec, ['inspect', ...ids])); }
   catch {
@@ -66,7 +66,7 @@ async function discover(handle, provider, options) {
     }
   }
   const ownIds = new Set(containers.map(({ info }) => info.Id));
-  const all = await allContainers(provider, handle.spec);
+  const volumeUsers = new Map();
   const volumes = new Map(), omittedMounts = [];
   for (const { service, info } of containers) {
     for (const mount of info.Mounts ?? []) {
@@ -87,7 +87,14 @@ async function discover(handle, provider, options) {
           || project && labels['com.docker.compose.project'] === project;
         if (!managed) reason = 'This volume is external or has no matching ownership label.';
         else if (volume.Driver !== 'local' || Object.keys(volume.Options ?? {}).length || volume.Scope !== 'local') reason = 'This volume uses an external driver or mount options.';
-        else if (all.some(other => !ownIds.has(other.Id) && (other.Mounts ?? []).some(item => item.Type === 'volume' && item.Name === mount.Name))) reason = 'Another container shares this volume.';
+        else {
+          if (!volumeUsers.has(mount.Name)) volumeUsers.set(mount.Name, await matchingContainers(provider, handle.spec, `volume=${mount.Name}`));
+          if (volumeUsers.get(mount.Name).some(other => !ownIds.has(other.Id) && (other.Mounts ?? []).some(item => item.Type === 'volume' && item.Name === mount.Name))) reason = 'Another container shares this volume.';
+        }
+      }
+      if (!reason && provider.snapshotVolumeNames) {
+        try { await provider.snapshotVolumeNames(handle.spec, { volumes: [{ id: 'check', mounts: [{ service, target: mount.Destination }] }] }); }
+        catch (error) { reason = error.message; }
       }
       if (reason) {
         if (!options.omitUnsupportedMounts) throw new Error(`${service}:${mount.Destination}: ${reason} Create a separate backup for this mount or select omitUnsupportedMounts.`);
@@ -343,8 +350,11 @@ export async function restoreSnapshot(spec, location, provider, options = {}) {
     }
     if (options.destinationHandle) await discover(options.destinationHandle, provider, { omitUnsupportedMounts: true });
     const volumes = await destinationVolumes(spec, manifest, provider, options);
-    const containers = await allContainers(provider, spec);
     const prefix = typeof provider.prefix === 'function' ? provider.prefix(spec) : undefined;
+    const containers = [
+      ...(prefix ? await matchingContainers(provider, spec, `name=${prefix}`) : []),
+      ...(options.composeProject ? await matchingContainers(provider, spec, `label=com.docker.compose.project=${options.composeProject}`) : []),
+    ];
     for (const info of containers) {
       if (prefix && (info.Name === `/${prefix}` || info.Name?.startsWith(`/${prefix}-`))
         || options.composeProject && info.Config?.Labels?.['com.docker.compose.project'] === options.composeProject) checkStopped(info);

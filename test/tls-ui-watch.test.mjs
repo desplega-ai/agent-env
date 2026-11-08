@@ -12,6 +12,24 @@ import { createProxy } from '../src/proxy.mjs';
 import { startUi } from '../src/ui.mjs';
 import { watchSource, shouldSync } from '../src/watch.mjs';
 import { RuntimeExtras } from '../src/runtime.mjs';
+import { run } from '../src/system.mjs';
+import { createPrivateKey, X509Certificate } from 'node:crypto';
+
+test('concurrent TLS processes preserve one matching CA and restrict its signing scope', async t => {
+  const directory = await mkdtemp('/tmp/dev-now-tls-race-');
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const module = new URL('../src/tls.mjs', import.meta.url).href;
+  await Promise.all(Array.from({ length: 4 }, (_, index) => run(process.execPath, ['--input-type=module', '-e', `import {ensureTls} from ${JSON.stringify(module)}; await ensureTls(${JSON.stringify(directory)}, ['host${index}.localhost']);`])));
+  const result = await ensureTls(directory, ['final.localhost']);
+  const authority = new X509Certificate(await readFile(result.caPath));
+  assert.equal(authority.checkPrivateKey(createPrivateKey(await readFile(join(directory, 'ca.key')))), true);
+  assert.equal(new X509Certificate(result.cert).verify(authority.publicKey), true);
+  assert.equal(new X509Certificate(result.cert).checkPrivateKey(createPrivateKey(result.key)), true);
+  await writeFile(join(directory, 'outside.cnf'), '[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=outside.example\n[leaf]\nsubjectAltName=DNS:outside.example\n');
+  await run('openssl', ['req', '-new', '-key', join(directory, 'server.key'), '-out', join(directory, 'outside.csr'), '-config', join(directory, 'outside.cnf')]);
+  await run('openssl', ['x509', '-req', '-in', join(directory, 'outside.csr'), '-CA', result.caPath, '-CAkey', join(directory, 'ca.key'), '-out', join(directory, 'outside.pem'), '-days', '1', '-extfile', join(directory, 'outside.cnf'), '-extensions', 'leaf']);
+  await assert.rejects(run('openssl', ['verify', '-CAfile', result.caPath, join(directory, 'outside.pem')]), /permitted subtree violation/);
+});
 
 test('HTTPS refuses colliding instance and service aliases', () => {
   const instances = {

@@ -10,6 +10,7 @@ Node 22 is the declared minimum. This session did not test Node 22 directly.
 - The initial `npm test` run passed 75 tests. Independent review reproduced a race during snapshot inspection on subsequent runs.
 - The fix tolerates unrelated container removal while preserving other inspection failures.
 - Three consecutive isolated `npm test` runs then passed all 87 tests, with no skips.
+- After the standards fixes, the final `npm test` run passed all 95 tests at default concurrency, with no skips.
 - Regression tests cover explicit cloud selection, idle shutdown, expiry, active peers, reconnect backoff, and secret redaction.
 - Native Docker E2E passed locally and through SSH.
 - Compose provider E2E passed builds, profiles, dependencies, completed jobs, aliases, health, isolation, external resources, and cleanup.
@@ -62,10 +63,17 @@ The module now reconciles state and retries bounded power-on failures. Regressio
 The final server inventory was empty. Checks also confirmed deletion of the owned IP and key.
 Unrelated SSH keys remained untouched.
 
+After the standards review, a second temporary CX23 in hel1 passed the committed `test:cloud` script.
+It rejected a changed credential before any API request and retained its local recovery keys.
+It synchronized `src/build`, recreated a retained fork without losing worktree ownership, and preserved its volume contents.
+Both instances then slept. Expiry deleted their shared machine without waking it.
+Explicit inventory checks found no server, IP, or key with that test record's label.
+
 ## HTTPS and UI
 
 Protocol tests validated the private CA, exact hostnames, HTTP/1.1, HTTP/2, secure upgrade forwarding, and same-origin header translation.
 They also checked conflicting HTTPS aliases and dashboard access restrictions.
+Four concurrent processes generated certificates against one CA. Tests confirmed matching keys and rejected a certificate for an external domain.
 The session did not install the CA into the user's trust store. HTTPS clients used the generated CA explicitly.
 
 Agent-browser verified the dashboard at 1440×900 and 390×844.
@@ -88,7 +96,9 @@ Final Docker inventories contained no dev-now test containers or volumes.
 Shared Docker caches were preserved. No global prune command ran.
 
 Disk availability changed from 9.8 GiB before the initial cleanup to 11 GiB afterward.
-Review tests removed their resources and temporary files. Available space remained 11 GiB at displayed precision.
+The first review pass removed its resources and temporary files. Available space remained 11 GiB at displayed precision.
+The second pass removed its resources and a verified older fixture containing 29,387 bytes.
+Disk availability was 11 GiB before that pass and 10 GiB afterward. Shared caches remained untouched.
 The daemon must remain running and connected for idle shutdown and expiry.
 Snapshots contain volume data, not a complete deployable source bundle.
 Firecracker execution and specific hosted sandbox vendors remain separate adapter work.
@@ -101,4 +111,13 @@ Minor fixes scope service templates to their environment, support delayed Compos
 Dashboard timestamps remain in BCN to follow the explicit project instructions.
 Automatic initialization supports Compose and Node projects. Other runtimes require an explicit command.
 Cloud timers apply to owned Hetzner machines.
-The separate engineering standards review remains pending.
+
+The engineering standards review found one critical issue and four important issues in the earlier revision.
+Its snapshot race and redaction findings overlapped the specification review.
+The remaining fixes bind cloud records to credentials, expire sleeping peers together, and unify source exclusions.
+Snapshot discovery now filters containers by volume or instance before inspection.
+Minor fixes add lifecycle backoff, share cloud defaults, clarify purge recovery, serialize TLS generation, and recover stale locks.
+The unused sandbox snapshot capability was removed.
+Anonymous Compose volumes now fail before export unless explicitly omitted.
+The live cloud test confirmed that container recreation retains worktree ownership.
+No critical or important finding remains unresolved.

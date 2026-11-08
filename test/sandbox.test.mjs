@@ -77,7 +77,7 @@ test('capabilities require explicit booleans and matching methods', () => {
   assert.throws(() => validateSandboxAdapter(partial), /declare capability fork/);
   assert.throws(() => validateSandboxAdapter(minimum({ capabilities: capabilities({ exec: true }) })), /no exec method/);
   assert.throws(() => validateSandboxAdapter(minimum({ capabilities: capabilities({ connect: false }) })), /requires capability connect/);
-  assert.throws(() => validateSandboxAdapter(minimum({ capabilities: capabilities({ snapshots: 'yes' }) })), /as a boolean/);
+  assert.throws(() => validateSandboxAdapter(minimum({ capabilities: capabilities({ compose: 'yes' }) })), /as a boolean/);
 });
 
 test('unsupported operations and required capabilities fail before execution', async () => {
@@ -90,7 +90,7 @@ test('unsupported operations and required capabilities fail before execution', a
   await assert.rejects(provider.exec(handle, 'web', []), /does not support exec/);
   await assert.rejects(provider.fork(handle, { ...value, name: 'other' }), /does not support fork/);
   await assert.rejects(provider.create({ ...value, compose: { file: 'compose.yaml' } }), /does not support compose/);
-  await assert.rejects(provider.create(spec({ adapter: '/local/adapter.mjs', requireCapabilities: ['snapshots'] })), /does not support snapshots/);
+  await assert.rejects(provider.create(spec({ adapter: '/local/adapter.mjs', requireCapabilities: ['snapshots'] })), /Unknown sandbox capability snapshots/);
   await assert.rejects(provider.create(spec({ adapter: '/local/adapter.mjs', requireCapabilities: ['firecracker'] })), /Unknown sandbox capability/);
   assert.equal(calls, 1);
   await provider.dispose();
@@ -175,7 +175,7 @@ test('Docker bridge retains volumes on stop and remove, resumes, forks, and purg
   const provider = new SandboxProvider({ dockerProvider: docker });
   t.after(() => provider.dispose());
   assert.equal((await provider.capabilities(spec())).compose, false);
-  assert.equal((await provider.capabilities(spec())).snapshots, false);
+  assert.equal((await provider.capabilities(spec())).snapshots, undefined);
   const handle = await provider.create(spec());
   assert.deepEqual(await provider.status(handle), { web: 'running' });
   const connection = (await provider.connect(handle))[0];

@@ -3,7 +3,7 @@
 Taras authorized autonomous implementation of the roadmap on 2026-11-08.
 Exclude the injected browser switcher. Include a small status UI and HTTPS.
 
-Implementation and live validation are complete. Specification review fixes passed regression tests. The engineering standards review remains pending.
+Implementation and live validation are complete. Both independent reviews received fixes and regression coverage.
 See VERIFICATION.md for evidence and explicit limits.
 
 ## Phase 1: Project and provider foundations

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadSpec } from '../src/config.mjs';
@@ -8,6 +8,24 @@ import { ComposeProvider, composeServiceMetadata } from '../src/providers/compos
 import { run } from '../src/system.mjs';
 
 const composeAvailable = await run('docker', ['compose', 'version']).then(() => true, () => false);
+test('remote Compose rejects excluded bind and build paths but accepts nested source directories', { skip: !composeAvailable }, async t => {
+  const cwd = await fixture(t);
+  for (const directory of ['build', 'dist', 'src/build']) {
+    await mkdir(join(cwd, directory), { recursive: true });
+    await writeFile(join(cwd, directory, 'Dockerfile'), 'FROM busybox:1.37\n');
+  }
+  for (const source of ['    build: ./build\n', '    volumes: ["./dist:/assets"]\n', '    build: {context: ., dockerfile: build/Dockerfile}\n']) {
+    await writeFile(join(cwd, 'compose.yaml'), `services:\n  worker:\n    image: busybox:1.37\n${source}`);
+    const spec = { ...await loadSpec({ cwd }), owner: 'test-owner', host: 'remote' };
+    await assert.rejects(new ComposeProvider().prepare(spec, '/remote/workspace', await fixture(t)), /excluded from checkout synchronization/);
+  }
+  await writeFile(join(cwd, 'compose.yaml'), 'services:\n  worker:\n    build: ./src/build\n    volumes: ["./src/build:/assets"]\n');
+  const spec = { ...await loadSpec({ cwd }), owner: 'test-owner', host: 'remote' };
+  const prepared = await new ComposeProvider().prepare(spec, '/remote/workspace', await fixture(t));
+  const model = JSON.parse(await readFile(prepared.localFile, 'utf8'));
+  assert.equal(model.services.worker.build.context, '/remote/workspace/src/build');
+  assert.equal(model.services.worker.volumes[0].source, '/remote/workspace/src/build');
+});
 async function fixture(t, yaml) {
   const cwd = await mkdtemp(join(tmpdir(), 'dev-now-compose-test-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));

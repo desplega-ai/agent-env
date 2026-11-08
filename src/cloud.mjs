@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { isIP } from 'node:net';
 import { run as systemRun, delay as systemDelay } from './system.mjs';
+import { withFileLock } from './locks.mjs';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const methods = ['server', 'primary-ip', 'ssh-key'];
@@ -87,43 +88,29 @@ export function createCloudManager({
     await mkdir(root, { recursive: true, mode: 0o700 });
     await chmod(root, 0o700);
     const path = join(root, `${recordKey(identity)}.lock`);
-    let lock;
-    try { lock = await open(path, 'wx', 0o600); }
-    catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      // Serialize stale-lock recovery so one recovery cannot unlink a new lock.
-      let recovery;
-      try { recovery = await open(`${path}.recovery`, 'wx', 0o600); }
-      catch { throw new Error('Cloud record is busy or requires lock recovery.'); }
-      try {
-        let pid;
-        try { pid = Number(await readFile(path, 'utf8')); }
-        catch (probe) { if (probe.code !== 'ENOENT') throw probe; }
-        if (pid !== undefined) {
-          if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Cloud record is locked. Check the lock before retry.');
-          try { process.kill(pid, 0); throw new Error('Cloud record is busy.'); }
-          catch (probe) { if (probe.code !== 'ESRCH') throw probe; }
-          await rm(path, { force: true });
-        }
-        try { lock = await open(path, 'wx', 0o600); }
-        catch { throw new Error('Cloud record is busy.'); }
-      } finally {
-        await recovery.close();
-        await rm(`${path}.recovery`, { force: true });
-      }
-    }
-    try {
-      await lock.writeFile(String(process.pid));
-      await lock.sync();
-      return await action();
-    } finally { await lock.close(); await rm(path, { force: true }); }
+    return withFileLock(path, action);
   }
-  async function command(binary, args) {
-    try { return await run(binary, args, { timeout: 120000, killSignal: 'SIGKILL' }); }
+
+  async function command(binary, args, env) {
+    try { return await run(binary, args, { timeout: 120000, killSignal: 'SIGKILL', ...(env ? { env } : {}) }); }
     catch { throw new Error(`${binary} ${binary === 'hcloud' ? args.slice(0, 2).join(' ') : 'command'} failed. Check authentication, connectivity, and resource availability.`); }
   }
-  async function hcloud(kind, action, args = [], json = false) {
-    const output = await command('hcloud', [kind, action, ...args, ...(json ? ['--output', 'json'] : [])]);
+  async function authentication(record) {
+    if (record && !record.authentication?.fingerprint) throw new Error('This older cloud record has no credential binding. Preserve its local keys and recover its resources in Hetzner.');
+    const quiet = { ...process.env, HCLOUD_DEBUG: 'false', HCLOUD_DEBUG_FILE: '' };
+    const get = field => command('hcloud', ['config', 'get', field, '--allow-sensitive'], quiet);
+    const context = (await get('context')).trim();
+    const fixed = { ...quiet, HCLOUD_CONTEXT: context };
+    const endpoint = (await command('hcloud', ['config', 'get', 'endpoint'], fixed)).trim();
+    const token = (await command('hcloud', ['config', 'get', 'token', '--allow-sensitive'], fixed)).trim();
+    if (!token || !endpoint) throw new Error('Configure an authenticated hcloud context before using cloud instances.');
+    const binding = { context, endpoint, fingerprint: digest(JSON.stringify([context, endpoint, token])) };
+    if (record && record.authentication?.fingerprint !== binding.fingerprint) throw new Error('The hcloud context, endpoint, or credential differs from this cloud record. Restore the original settings. Local keys remain intact.');
+    return { binding, env: { ...fixed, HCLOUD_ENDPOINT: endpoint, HCLOUD_TOKEN: token } };
+  }
+  async function hcloud(record, kind, action, args = [], json = false) {
+    const { env } = await authentication(record);
+    const output = await command('hcloud', [kind, action, ...args, ...(json ? ['--output', 'json'] : [])], env);
     if (!json) return output;
     try { return JSON.parse(output); } catch { throw new Error(`hcloud ${kind} ${action} returned invalid JSON.`); }
   }
@@ -135,7 +122,7 @@ export function createCloudManager({
   }
   async function reconcile(record, kind) {
     // Listing also distinguishes absence from API errors and changed ownership labels.
-    const resources = await hcloud(kind, 'list', [], true);
+    const resources = await hcloud(record, kind, 'list', [], true);
     if (!Array.isArray(resources)) throw new Error(`hcloud ${kind} list returned invalid resources.`);
     const field = fields[kind];
     const owned = resources.filter(resource => resource.labels?.['dev-now.record'] === record.recordId);
@@ -157,16 +144,17 @@ export function createCloudManager({
       if (identity[field] != null && record[field] != null && identity[field] !== record[field]) throw new Error(`Cloud handle ${field} does not match its ownership record.`);
     }
     if (identity.primaryIpIds?.length && record.primaryIpId && !identity.primaryIpIds.includes(record.primaryIpId)) throw new Error('Cloud handle IP does not match its ownership record.');
+    await authentication(record);
     return record;
   }
   async function createResource(record, kind, args) {
     const existing = await reconcile(record, kind);
     if (existing) return existing;
-    if (record.attempted[kind]) throw new Error(`Cloud ${kind} creation has an uncertain result or a missing resource. Dispose the failed start before replacement.`);
+    if (record.attempted[kind]) throw new Error(`Cloud ${kind} creation has an uncertain result or a missing resource. Run dev-now rm ${record.name} --purge before replacement.`);
     // Store intent before the external side effect, including requests with lost responses.
     record.attempted[kind] = true;
     await save(record);
-    const result = await hcloud(kind, 'create', ['--name', `${record.resourceName}-${kind}`, ...labelArgs(record), ...args], true);
+    const result = await hcloud(record, kind, 'create', ['--name', `${record.resourceName}-${kind}`, ...labelArgs(record), ...args], true);
     const resource = result[kind.replaceAll('-', '_')] ?? result;
     verify(record, kind, resource);
     record[fields[kind]] = resource.id;
@@ -220,9 +208,10 @@ export function createCloudManager({
         const options = cloudOptions({ ...record?.options, ...(typeof spec.cloud === 'string' ? { provider: spec.cloud } : explicit) });
         if (record && ['type', 'image', 'location'].some(key => options[key] !== record.options[key])) throw new Error('Cloud machine options differ from the ownership record. Purge before replacement.');
         if (options.expiresAt && Date.parse(options.expiresAt) <= now()) throw new Error('Cloud expiry has elapsed. Destroy or extend this instance before start.');
+        const { binding } = await authentication(record);
         if (!record) {
           const recordId = randomUUID().replaceAll('-', '');
-          record = { version: 1, owner: spec.owner, name: spec.name, recordId, resourceName: `dn-${recordId}`, createdAt: new Date(now()).toISOString(), options, attempted: {}, committed: false };
+          record = { version: 1, owner: spec.owner, name: spec.name, recordId, resourceName: `dn-${recordId}`, createdAt: new Date(now()).toISOString(), options, authentication: binding, attempted: {}, committed: false };
           await mkdir(directory(record), { recursive: true, mode: 0o700 });
           await chmod(directory(record), 0o700);
           await save(record);
@@ -241,7 +230,7 @@ export function createCloudManager({
           '--ssh-key', String(key.id), '--primary-ipv4', String(ip.id), '--without-ipv6', '--user-data-from-file', join(dir, 'cloud-init.yaml')]);
         if (server.public_net?.ipv4?.id !== ip.id) throw new Error('Cloud server IP does not match the ownership record.');
         for (let attempt = 0; server?.status === 'off' && attempt < 3; attempt++) {
-          try { await hcloud('server', 'poweron', [String(server.id)]); }
+          try { await hcloud(record, 'server', 'poweron', [String(server.id)]); }
           catch (error) {
             server = await reconcile(record, 'server');
             if (!server || !['off', 'running', 'starting'].includes(server.status) || (server.status === 'off' && attempt === 2)) throw error;
@@ -272,7 +261,7 @@ export function createCloudManager({
       const record = await loadHandle(handle);
       const server = await reconcile(record, 'server');
       if (!server) throw new Error('Cloud server is missing. No resource was changed.');
-      if (server.status !== 'off') await hcloud('server', 'shutdown', ['--wait', '--wait-timeout', '120s', String(server.id)]);
+      if (server.status !== 'off') await hcloud(record, 'server', 'shutdown', ['--wait', '--wait-timeout', '120s', String(server.id)]);
       return { ...metadata(record), status: 'off' };
     });
   }
@@ -291,7 +280,7 @@ export function createCloudManager({
       if (resources[kind]) {
         // Recheck ownership immediately before each destructive operation.
         const resource = await reconcile(record, kind);
-        if (resource) await hcloud(kind, 'delete', [String(resource.id)]);
+        if (resource) await hcloud(record, kind, 'delete', [String(resource.id)]);
       }
       delete record[fields[kind]];
       await save(record);

@@ -5,10 +5,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { DockerProvider } from '../src/providers/docker.mjs';
+import { ComposeProvider } from '../src/providers/compose.mjs';
 import { snapshotInstance, restoreSnapshot } from '../src/snapshots.mjs';
 
 const provider = new DockerProvider();
 const image = 'busybox:1.37';
+test('Compose snapshot rejects anonymous volumes before export and supports explicit omission', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dev-now-anonymous-snapshot-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const compose = new ComposeProvider();
+  const spec = { name: 'test', owner: 'test-owner', services: { worker: { composeService: 'worker' } }, compose: { model: { services: { worker: { volumes: [{ type: 'volume', target: '/data' }] } } } } };
+  const container = { Id: 'owned', State: { Status: 'exited' }, Config: { Labels: { 'com.docker.compose.project': 'test-project' } }, Mounts: [{ Type: 'volume', Name: 'anonymous', Destination: '/data' }] };
+  compose.docker = async (_spec, args) => {
+    if (args[0] === 'inspect') return JSON.stringify([container]);
+    if (args[0] === 'container') return 'owned';
+    if (args[0] === 'volume') return JSON.stringify([{ Driver: 'local', Scope: 'local', Labels: { 'com.docker.compose.project': 'test-project' } }]);
+    assert.fail(`Unexpected archive command: ${args[0]}`);
+  };
+  const handle = { spec, services: { worker: { container: 'owned' } } };
+  await assert.rejects(snapshotInstance(handle, join(directory, 'failed'), compose), /requires a managed destination volume/);
+  const result = await snapshotInstance(handle, join(directory, 'omitted'), compose, { omitUnsupportedMounts: true });
+  assert.equal(result.manifest.volumes.length, 0);
+  assert.equal(result.manifest.omittedMounts.length, 1);
+});
 let unavailable;
 try {
   await provider.docker({}, ['info', '--format', '{{.ServerVersion}}']);
@@ -86,7 +105,7 @@ test('snapshot skips an unrelated removed container but preserves inspection fai
   let remains = false, injected = false;
   const missing = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
   wrapped.docker = async (spec, args, options) => {
-    if (args.join(' ') === 'container ls -aq') { injected = true; return `${await provider.docker(spec, args, options)}\n${missing}`; }
+    if (args[0] === 'container' && args.some(value => value.startsWith('volume='))) { injected = true; return `${await provider.docker(spec, args, options)}\n${missing}`; }
     if (args[0] === 'inspect' && args.includes(missing)) throw new Error('Container inspection failed.');
     if (args.includes(`id=${missing}`)) return remains ? missing : '';
     return provider.docker(spec, args, options);

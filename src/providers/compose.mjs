@@ -5,6 +5,7 @@ import { hash, validate } from '../config.mjs';
 import { parseEnvFile, redactEnvironment, sensitiveValuesForSpec } from '../environments.mjs';
 import { home } from '../paths.mjs';
 import { quote, run } from '../system.mjs';
+import { shouldSync } from '../source-paths.mjs';
 
 export async function detectComposeFiles(cwd) {
   for (const name of ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml']) {
@@ -166,7 +167,7 @@ export async function resolveComposeSpec(spec) {
   return { ...spec, sensitiveValues: [...new Set(sensitiveValues.filter(value => typeof value === 'string' && value))].sort(), compose: { ...spec.compose, model, environment: captured }, services: composeServiceMetadata(model, spec.compose) };
 }
 
-async function checkoutPath(spec, source, workspace) {
+async function checkoutPath(spec, source, workspace, transferredSeparately = false) {
   const absolute = resolve(spec.cwd, source.replaceAll('$$', '$'));
   const actual = await realpath(absolute).catch(error => {
     if (error.code === 'ENOENT') throw new Error('A remote Compose path does not exist in the checkout.');
@@ -174,6 +175,7 @@ async function checkoutPath(spec, source, workspace) {
   });
   const path = relative(spec.cwd, actual);
   if (path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path)) throw new Error('Remote Compose bind, build, config, and secret paths must remain inside the checkout.');
+  if (!transferredSeparately && !shouldSync(path)) throw new Error('Remote Compose paths cannot use files excluded from checkout synchronization.');
   return { actual, remote: join(workspace, path).replaceAll('$', '$$'), relative: path };
 }
 function remoteContext(source) {
@@ -271,7 +273,6 @@ export class ComposeProvider extends DockerProvider {
         for (const volume of service.volumes ?? []) {
           if (volume.type !== 'bind') continue;
           const mapped = await checkoutPath(spec, volume.source, workspace);
-          if (mapped.relative.split(sep).some(part => ['.git', 'node_modules', '.dev-now'].includes(part) || /^\.env(?:\.|$)/.test(part))) throw new Error('Remote bind paths cannot use files excluded from checkout synchronization.');
           volume.source = mapped.remote;
         }
         if (service.build) {
@@ -311,7 +312,7 @@ export class ComposeProvider extends DockerProvider {
           resource.file = filename;
         }
         if (!resource.file || !spec.host) continue;
-        const local = resource.file.startsWith(`${directory}${sep}`) ? resource.file : (await checkoutPath(spec, resource.file, workspace)).actual;
+        const local = resource.file.startsWith(`${directory}${sep}`) ? resource.file : (await checkoutPath(spec, resource.file, workspace, true)).actual;
         const filename = `${kind}-${hash(name)}`;
         assets.push({ local, remote: join(workspace, '.dev-now', filename) });
         resource.file = join(workspace, '.dev-now', filename);

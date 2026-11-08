@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cloudCanSleep, maintainInstances } from '../src/maintenance.mjs';
+import { cloudCanSleep, maintainInstances, expireCloudMachine } from '../src/maintenance.mjs';
 
 function fixture() {
   let clock = 10000, failure = false;
-  const instances = {}, actions = [], reconnections = [], sleeps = [];
+  const instances = {}, actions = [], reconnections = [], sleeps = [], destroyed = [];
   const retries = new Map(), errors = new Map();
   const add = (name, cloud, extra = {}) => instances[name] = { spec: { name, host: 'ssh-host', cloud }, running: true, lastActivity: 0, ...extra };
   const options = {
@@ -15,11 +15,11 @@ function fixture() {
       if (message.type === 'down') {
         handle.running = false;
         if (cloudCanSleep(handle, instances)) sleeps.push(handle.spec.cloud.recordId);
-      } else delete instances[message.name];
+      } else await expireCloudMachine(handle, { instances, destroy: async handle => destroyed.push(handle.spec.cloud.recordId), disconnect: async () => {}, save: async () => {} });
     },
     reconnect: async handle => { reconnections.push(handle.spec.name); if (failure) throw new Error('private-failure'); handle.connected = true; },
   };
-  return { instances, add, actions, reconnections, sleeps, retries, errors, tick: () => maintainInstances(options), clock: value => { clock = value; }, fail: value => { failure = value; } };
+  return { instances, add, actions, reconnections, sleeps, destroyed, retries, errors, tick: () => maintainInstances(options), clock: value => { clock = value; }, fail: value => { failure = value; } };
 }
 
 test('idle shutdown waits for all peers and sleeps only after the final running peer', async () => {
@@ -45,7 +45,8 @@ test('expiry purges running and sleeping peers before idle or reconnect work', a
   f.add('alpha', cloud);
   f.add('beta', cloud, { running: false, sleeping: true });
   await f.tick();
-  assert.deepEqual(f.actions, [{ type: 'rm', name: 'alpha', purge: true }, { type: 'rm', name: 'beta', purge: true }]);
+  assert.deepEqual(f.actions, [{ type: 'expire', name: 'alpha' }]);
+  assert.deepEqual(f.destroyed, ['shared']);
   assert.deepEqual(f.instances, {});
   assert.deepEqual(f.reconnections, []);
 });
@@ -87,7 +88,7 @@ test('reconnect uses bounded backoff and clears errors after recovery', async ()
 
 test('one failed expiry does not prevent another instance from reconnecting', async () => {
   const instances = {
-    expired: { spec: { name: 'expired', cloud: { expiresAt: new Date(1).toISOString() }, sensitiveValues: ['hidden'] } },
+    expired: { spec: { name: 'expired', cloud: { recordId: 'expired', expiresAt: new Date(1).toISOString() }, sensitiveValues: ['hidden'] } },
     ssh: { spec: { name: 'ssh', host: 'host' }, running: true },
   };
   const errors = new Map(), names = [];
@@ -95,4 +96,35 @@ test('one failed expiry does not prevent another instance from reconnecting', as
     action: async () => { throw new Error('hidden'); }, reconnect: async handle => names.push(handle.spec.name) });
   assert.equal(errors.get('expired'), '[redacted]');
   assert.deepEqual(names, ['ssh']);
+});
+
+test('sleeping peers expire together and failed destruction retains every handle', async () => {
+  const f = fixture();
+  const cloud = { recordId: 'sleeping', expiresAt: new Date(10000).toISOString() };
+  const alpha = f.add('alpha', cloud, { running: false, sleeping: true });
+  f.add('beta', cloud, { running: false, sleeping: true });
+  await assert.rejects(expireCloudMachine(alpha, { instances: f.instances, disconnect: async () => {}, destroy: async () => { throw new Error('wrong project'); }, save: async () => assert.fail('must retain state') }), /wrong project/);
+  assert.deepEqual(Object.keys(f.instances), ['alpha', 'beta']);
+  await f.tick();
+  assert.deepEqual(f.destroyed, ['sleeping']);
+  assert.deepEqual(f.reconnections, []);
+  assert.deepEqual(f.instances, {});
+});
+
+for (const type of ['expiry', 'idle']) test(`${type} failures share bounded backoff across machine peers`, async () => {
+  let clock = 10000, attempts = 0;
+  const cloud = { recordId: 'shared', ...(type === 'expiry' ? { expiresAt: new Date(1).toISOString() } : { idleTimeoutMs: 1 }) };
+  const instances = Object.fromEntries(['alpha', 'beta'].map(name => [name, { spec: { name, cloud }, running: true, lastActivity: 0 }]));
+  const options = { instances, retries: new Map(), errors: new Map(), now: () => clock, connected: () => true,
+    action: async () => { attempts++; throw new Error('unavailable'); }, reconnect: async () => assert.fail('must not reconnect') };
+  await maintainInstances(options);
+  assert.equal(attempts, 1);
+  await maintainInstances(options);
+  assert.equal(attempts, 1);
+  for (let count = 2; count <= 8; count++) {
+    clock = options.retries.get(`${type}:${cloud.recordId}`).next;
+    await maintainInstances(options);
+    assert.equal(attempts, count);
+    assert.equal(options.retries.get(`${type}:${cloud.recordId}`).next - clock, Math.min(60000, 1000 * 2 ** count));
+  }
 });
