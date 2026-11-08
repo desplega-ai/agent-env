@@ -82,3 +82,18 @@ No commits or pushes were made.
 `df -h /` reported 11 GiB available before the task.
 It reported 6.7 GiB before final cleanup and 10 GiB after cleanup, approximately 3.3 GiB recovered.
 Other work used the shared machine concurrently, so these figures do not isolate all changes in disk usage.
+
+## Packaged CLI regression check
+
+A later check installed the `0.3.0` candidate archive into a temporary prefix.
+It used the same Agent Swarm revision and the configurations shipped inside that archive.
+It repeated startup, authentication, KV writes, API exec, and persistence after `up NAME --timeout 900`.
+It then rotated the private API key and applied the edited env file through `up --name NAME`.
+The new credential worked, and the existing KV value remained available without another write.
+Two UI file edits appeared without a restart.
+
+The first live-file assertion ran before Vite detected the new file.
+The final check waited for the expected response, with a ten-second deadline, and passed.
+The same check passed after separating image builds from the Compose readiness timeout.
+All instances, volumes, temporary source copies, credentials, and daemons from these checks were removed.
+The original Agent Swarm checkout remained unchanged.

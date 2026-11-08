@@ -49,7 +49,7 @@ The helper accepts these options:
 | --- | --- | --- |
 | `image` | Both | Archive helper image. Default: `busybox:1.37`. |
 | `endpointUrl` | S3 operations | AWS CLI endpoint URL for compatible services. |
-| `awsCommand` | S3 operations | AWS executable path. Default: installed `aws`. Tests use a fake executable. |
+| `awsCommand` | S3 operations | AWS executable path. Default: installed `aws`. |
 | `omitUnsupportedMounts` | Export | Explicitly omit unsupported or shared mounts. Default: reject them. |
 | `volumeNames` | Restore | Map manifest volume IDs, such as `v0`, to fresh Docker volume names. |
 | `destinationHandle` | Restore | Identify existing destination service containers for a stopped-state check. |
