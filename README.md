@@ -4,13 +4,23 @@
 
 Run a development stack locally, over SSH, or on an on-demand Hetzner machine. Open each instance through localhost.
 
-The CLI uses Node 22+, Docker, and a local routing daemon. It has no npm dependencies.
+Part of [Desplega Labs](https://desplega.sh), alongside [Agent Swarm](https://github.com/desplega-ai/agent-swarm) and [agent-fs](https://github.com/desplega-ai/agent-fs).
+Released under the [MIT license](LICENSE).
+
+The CLI runs on macOS or Linux with Node 22+, Docker, and a local routing daemon. It has no npm dependencies.
 [Tesser](https://tesser.sh/) inspired the workflow. [Portless](https://github.com/vercel-labs/portless) informed the shared HTTPS proxy and local certificate authority.
 
 ## Start
 
+Install the published package:
+
 ```sh
-npm link --ignore-scripts --no-audit --no-fund
+npm install -g @desplega.ai/agent-env
+```
+
+For a source checkout, run `npm link --ignore-scripts --no-audit --no-fund` in this repository instead.
+
+```sh
 cd /path/to/project
 agent-env init
 agent-env up --name app --https
@@ -19,6 +29,7 @@ agent-env ui
 
 `init` detects Compose files, package scripts, package managers, and common framework ports.
 It never replaces an existing configuration or edits package scripts.
+For a first dependency installation, use `agent-env up --timeout 900` or set `startupTimeoutSeconds` in `agent-env.json`.
 For an unknown project, supply a command:
 
 ```sh
@@ -33,6 +44,8 @@ agent-env up --name demo
 ```
 
 Open `http://demo.localhost:3300`. The example also provides Postgres on `localhost:55432` with development-only credentials.
+
+For a full application, use the [Agent Swarm development example](docs/agent-swarm.md).
 
 ## Local and remote
 
@@ -76,6 +89,32 @@ See the [Compose example and contract](examples/compose/README.md).
 
 ## Environments and secrets
 
+`agent-env up` reads `.env` and `.env.local` automatically when those files exist.
+`agent-env up --env review` also reads `.env.review` and `.env.review.local`, in that order.
+A named dotenv file can define an environment without a JSON overlay.
+Files with names such as `.env.example` never load automatically.
+
+```sh
+agent-env up                         # Uses the project's dotenv files
+agent-env up --env review            # Adds the review dotenv files
+agent-env up --env-file .env.custom  # Replaces automatic file selection
+agent-env up --no-env-file           # Disables global dotenv files
+```
+
+For native Docker services, later files override earlier files.
+Private stored values override files, configuration values override the private store, and service values override the project configuration.
+Native Docker treats file values literally. It never executes shell commands or expands `${VARIABLE}` expressions.
+The parent shell enters native containers only through explicit `{ "env": "NAME" }` references.
+
+Compose keeps its own interpolation rules and shell precedence.
+Private stored values and explicit project configuration override the Compose interpolation environment.
+Each Compose service still declares its container variables with `environment` or `env_file`.
+`--no-env-file` disables global dotenv files. It does not disable service `env_file` declarations.
+
+Environment files stay outside remote source synchronization.
+The CLI resolves values locally and sends the required container configuration over SSH.
+Saved instances retain their resolved values. Use `up --name NAME` to load edited files, or `up NAME` to resume saved values.
+
 ```sh
 agent-env env set POSTGRES_PASSWORD --from-env MY_DATABASE_PASSWORD
 # Or: agent-env env set POSTGRES_PASSWORD < /path/to/private/password-file
@@ -109,8 +148,7 @@ agent-env up --env review --name review
 
 Values can be strings, `{ "secret": "KEY" }`, or `{ "env": "SHELL_VARIABLE" }`.
 Repeated `--env-file FILE` options select explicit environment files.
-Native Docker environment files contain literal values. Compose retains its own interpolation rules.
-Compose container variables still follow each service's `environment` configuration.
+Set `envFiles: []` in `agent-env.json` to disable automatic dotenv files for that configuration.
 
 ## Services and caching
 

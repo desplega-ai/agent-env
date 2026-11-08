@@ -1,7 +1,7 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { loadEnvironment, resolveEnvironment, stringList } from './environments.mjs';
+import { discoverEnvironmentFiles, loadEnvironment, resolveEnvironment, stringList } from './environments.mjs';
 import { cloudOptions } from './cloud.mjs';
 
 export const hash = value => createHash('sha256').update(value).digest('hex').slice(0, 8);
@@ -11,6 +11,9 @@ export function validName(value) {
 }
 export function validate(spec) {
   validName(spec.name);
+  if (spec.startupTimeoutSeconds !== undefined && (!Number.isInteger(spec.startupTimeoutSeconds) || spec.startupTimeoutSeconds < 1 || spec.startupTimeoutSeconds > 3600)) {
+    throw new Error('Set the startup timeout to an integer from 1 to 3600 seconds.');
+  }
   if (typeof spec.provider !== 'string' || !spec.provider) throw new Error('Specify a provider name.');
   if (spec.host && !/^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$/.test(spec.host)) throw new Error('Use an SSH alias or user@host. Configure ports and keys in SSH config.');
   if (spec.provider === 'compose') {
@@ -63,12 +66,19 @@ export async function loadSpec(options = {}, command = []) {
   const names = stringList(options.env, 'env');
   if (names.length > 1) throw new Error('Select one named environment per instance.');
   const environment = names[0] ?? 'default';
+  if (!/^[a-z][a-z0-9-]{0,47}$/.test(environment)) throw new Error('Use a valid environment name.');
+  const discoveredFiles = await discoverEnvironmentFiles(cwd, environment);
+  if (environment !== 'default' && !Object.hasOwn(config.environments ?? {}, environment)
+    && discoveredFiles.some(file => file === resolve(cwd, `.env.${environment}`) || file === resolve(cwd, `.env.${environment}.local`))) {
+    config.environments = { ...config.environments, [environment]: {} };
+  }
   const environmentName = config.environments?.[environment]?.name;
   config = resolveEnvironment(config, environment);
   const base = basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, environment === 'default' ? 30 : 24);
   const suffix = environment === 'default' ? '' : `-${hash(environment)}`;
   const configuredName = environmentName ?? (config.name ? environment === 'default' ? config.name : `${config.name.slice(0, 39)}${suffix}` : undefined);
   const spec = { ...config, cwd, environment, name: options.name ?? configuredName ?? `dev-${base}-${hash(cwd)}${suffix}`, provider: config.provider ?? 'docker' };
+  if (options.timeout !== undefined) spec.startupTimeoutSeconds = Number(options.timeout);
   if ([options.ssh, options.local, options.cloud].filter(Boolean).length > 1) throw new Error('Select only one target: --ssh, --local, or --cloud.');
   if (options.ssh) { spec.host = options.ssh; delete spec.cloud; }
   if (options.local) { delete spec.host; delete spec.cloud; delete spec.sshConfig; }
@@ -88,16 +98,18 @@ export async function loadSpec(options = {}, command = []) {
     spec.cloud = cloudOptions(cloud);
   }
   if (options['ssh-config']) spec.sshConfig = resolve(cwd, options['ssh-config']);
-  spec.envFiles = stringList(options['env-file'] ?? config.envFiles ?? config.envFile, 'env-file').map(file => resolve(cwd, file));
+  if (options['no-env-file'] && options['env-file']) throw new Error('Select --env-file or --no-env-file, not both.');
+  spec.envFiles = options['no-env-file'] ? [] : stringList(options['env-file'] ?? config.envFiles ?? config.envFile ?? discoveredFiles, 'env-file').map(file => resolve(cwd, file));
   // These values remain in memory and private daemon state. Initialization never writes them.
   spec.sensitiveValues = [];
-  spec.env = await loadEnvironment({ cwd, environment, files: spec.envFiles, values: config.env, sensitiveValues: spec.sensitiveValues });
   const { detectComposeFiles, resolveComposeSpec } = await import('./providers/compose.mjs');
   const composeFiles = stringList(options['compose-file'] ?? config.compose?.files ?? config.composeFiles, 'compose-file');
   const detected = !config.provider && !config.services && !command.length ? await detectComposeFiles(cwd) : [];
   if (!command.length && (spec.provider === 'compose' || composeFiles.length || detected.length)) {
     if (config.services) throw new Error('Use Compose override files for service configuration. Use env and compose.routes in agent-env.json.');
     spec.provider = 'compose';
+    // Compose resolves dotenv interpolation. Only explicit values override its environment.
+    spec.env = await loadEnvironment({ cwd, environment, values: config.env, sensitiveValues: spec.sensitiveValues });
     spec.compose = {
       ...config.compose,
       files: (composeFiles.length ? composeFiles : detected.length ? detected : await detectComposeFiles(cwd)).map(file => resolve(cwd, file)),
@@ -106,6 +118,7 @@ export async function loadSpec(options = {}, command = []) {
     return validate(await resolveComposeSpec(spec));
   }
   if (options.profile !== undefined || composeFiles.length) throw new Error('Compose profiles and files require the Compose provider without a command override.');
+  spec.env = await loadEnvironment({ cwd, environment, files: spec.envFiles, values: config.env, sensitiveValues: spec.sensitiveValues });
   if (command.length) {
     spec.provider = 'docker';
     spec.services = { web: { image: options.image ?? 'node:22-bookworm-slim', port: Number(options.port ?? 3000), command: command.map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' '), volumes: { dependencies: '/workspace/node_modules', cache: '/root/.npm' } } };

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { mkdir, open, unlink, rm, stat } from 'node:fs/promises';
+import { mkdir, open, unlink, rm, stat, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { trustTls } from '../src/tls.mjs';
@@ -42,9 +42,10 @@ Options:
   --ssh HOST, --ssh-config FILE, --local, --provider NAME, --adapter FILE
   --cloud hetzner, --cloud-type TYPE, --location LOCATION
   --idle-minutes MINUTES, --ttl-hours HOURS (require a cloud target)
-  --env NAME, --env-file FILE, --from-env VARIABLE
+  --env NAME, --env-file FILE, --no-env-file, --from-env VARIABLE
+  --version                         Show the installed package version
   --compose-file FILE, --profile NAME (repeat for multiple files or profiles)
-  --https, --https-port PORT, --no-watch
+  --https, --https-port PORT, --no-watch, --timeout SECONDS (startup, default 60)
   --worktree PATH, --branch BRANCH, --ref REF
   --endpoint URL, --omit-mounts, --all, --purge
   --remove-worktree, --discard-worktree (requires --remove-worktree)
@@ -52,7 +53,7 @@ Options:
 Requires Node 22+ and Docker. SSH targets require Docker, rsync, and Bash.
 HTTP supports named hosts and WebSockets. TCP uses the selected instance.
 `;
-function request(message, timeout = 600000) {
+function request(message, timeout = Math.max(600000, (message.spec?.startupTimeoutSeconds ?? 0) * 1000 + 120000)) {
   return new Promise((resolve, reject) => {
     const req = http.request({ socketPath, path: '/', method: 'POST', headers: { 'content-type': 'application/json' } }, async response => {
       try {
@@ -124,7 +125,9 @@ async function main() {
   const separator = args.indexOf('--');
   const command = separator < 0 ? [] : args.splice(separator).slice(1);
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
-    'env-file': { type: 'string', multiple: true }, 'from-env': { type: 'string' },
+    'env-file': { type: 'string', multiple: true }, 'no-env-file': { type: 'boolean' }, 'from-env': { type: 'string' },
+    version: { type: 'boolean', short: 'v' },
+    timeout: { type: 'string' },
     'remove-worktree': { type: 'boolean' }, 'discard-worktree': { type: 'boolean' }, 'omit-mounts': { type: 'boolean' },
     cloud: { type: 'string' }, 'cloud-type': { type: 'string' }, location: { type: 'string' }, 'idle-minutes': { type: 'string' }, 'ttl-hours': { type: 'string' },
     provider: { type: 'string' }, adapter: { type: 'string' }, env: { type: 'string' }, profile: { type: 'string', multiple: true }, 'compose-file': { type: 'string', multiple: true },
@@ -135,6 +138,11 @@ async function main() {
     json: { type: 'boolean' }, all: { type: 'boolean' }, purge: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   } });
   const [type, name, destination] = positionals;
+  if (values.version) {
+    const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+    console.log(values.json ? JSON.stringify({ version }) : version);
+    return;
+  }
   if (!type || values.help || type === 'help') { console.log(help); return; }
   if (type === 'trust') { display(await trustTls(), values.json); return; }
   if (type === 'add') { display(await addService(name, { config: values.config, port: values.port, environment: values.env }), values.json); return; }

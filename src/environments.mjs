@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -12,6 +12,18 @@ export function stringList(value, label) {
   const values = Array.isArray(value) ? value : [value];
   if (values.some(item => typeof item !== 'string' || !item)) throw new Error(`${label} requires a string or an array of strings.`);
   return values;
+}
+
+export async function discoverEnvironmentFiles(cwd, environment = 'default') {
+  const candidates = ['.env', '.env.local'];
+  if (environment !== 'default') candidates.push(`.env.${environment}`, `.env.${environment}.local`);
+  const files = [];
+  for (const candidate of candidates) {
+    const filename = resolve(cwd, candidate);
+    try { if ((await stat(filename)).isFile()) files.push(filename); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return files;
 }
 
 // Values are literal. This parser never executes commands or expands variables.

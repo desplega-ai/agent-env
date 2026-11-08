@@ -67,7 +67,8 @@ export class DockerProvider {
     }
   }
   async wait(handle) {
-    const deadline = Date.now() + 60000;
+    const seconds = handle.spec.startupTimeoutSeconds ?? 60;
+    const deadline = Date.now() + seconds * 1000;
     for (const [name, service] of Object.entries(handle.services)) {
       while (true) {
         const info = JSON.parse(await this.docker(handle.spec, ['inspect', service.container]))[0];
@@ -93,7 +94,7 @@ export class DockerProvider {
           if (ready && service.health) ready = await this.docker(handle.spec, ['exec', service.container, 'sh', '-lc', service.health]).then(() => true, () => false);
           if (ready) break;
         }
-        if (Date.now() > deadline) throw new Error(`${name} did not open its port within 60 seconds. Bind the service to 0.0.0.0.`);
+        if (Date.now() > deadline) throw new Error(`${name} did not open its port within ${seconds} seconds. Bind the service to 0.0.0.0.`);
         await delay(300);
       }
     }

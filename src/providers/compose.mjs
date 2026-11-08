@@ -27,7 +27,7 @@ function sourceArgs(spec) {
   return ['compose', '--project-directory', spec.cwd, '--project-name', 'agent-env-parse',
     ...spec.compose.files.flatMap(file => ['-f', file]),
     ...(spec.compose.profiles ?? []).flatMap(profile => ['--profile', profile]),
-    ...(spec.envFiles ?? []).flatMap(file => ['--env-file', file])];
+    ...(spec.envFiles?.length ? spec.envFiles : ['/dev/null']).flatMap(file => ['--env-file', file])];
 }
 function composeEnvironment(spec) {
   // The caller selects files and profiles. Ambient Compose options must not change that selection.
@@ -132,7 +132,7 @@ export async function resolveComposeSpec(spec) {
   const environment = await interpolationEnvironment(spec);
   const keys = new Set([...Object.keys(spec.env ?? {}), ...await interpolationKeys(spec)]);
   const sensitiveValues = [...(spec.sensitiveValues ?? [])];
-  for (const file of spec.envFiles?.length ? spec.envFiles : [join(spec.cwd, '.env')]) {
+  for (const file of spec.envFiles ?? []) {
     try {
       const values = parseEnvFile(await readFile(file, 'utf8'));
       for (const key of Object.keys(values)) { keys.add(key); sensitiveValues.push(values[key], environment[key]); }
@@ -356,7 +356,7 @@ export class ComposeProvider extends DockerProvider {
         }
       }
       attempted = true;
-      await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', '60']);
+      await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', String(spec.startupTimeoutSeconds ?? 60)]);
       await this.wait(handle);
       return handle;
     } catch (error) {
@@ -396,7 +396,7 @@ export class ComposeProvider extends DockerProvider {
   }
   async start(handle) {
     await this.sync(handle);
-    await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', '60']);
+    await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', String(handle.spec.startupTimeoutSeconds ?? 60)]);
     await this.wait(handle);
   }
   stop(handle) { return this.compose(handle, ['stop', '-t', '5']); }
