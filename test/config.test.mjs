@@ -9,13 +9,13 @@ import { join } from 'node:path';
 
 const spec = () => ({ name: 'demo', provider: 'docker', services: { web: { image: 'busybox:1.37', port: 3000 } } });
 test('cloud lifecycle flags cannot change local or SSH targets into cloud machines', async t => {
-  const cwd = await mkdtemp(join(tmpdir(), 'dev-now-target-test-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'agent-env-target-test-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
-  const filename = join(cwd, 'dev-now.json');
+  const filename = join(cwd, 'agent-env.json');
   await writeFile(filename, JSON.stringify(spec()));
   for (const flag of ['idle-minutes', 'ttl-hours', 'location', 'cloud-type']) {
     for (const target of [[], ['--ssh', 'example-host'], ['--local']]) {
-      await assert.rejects(run(process.execPath, [new URL('../bin/dev-now.mjs', import.meta.url).pathname, 'up', ...target, `--${flag}`, '5'], { cwd, env: { ...process.env, DEV_NOW_HOME: join(cwd, 'state') } }), /Cloud options require/);
+      await assert.rejects(run(process.execPath, [new URL('../bin/agent-env.mjs', import.meta.url).pathname, 'up', ...target, `--${flag}`, '5'], { cwd, env: { ...process.env, AGENT_ENV_HOME: join(cwd, 'state') } }), /Cloud options require/);
       await assert.rejects(stat(join(cwd, 'state')), { code: 'ENOENT' });
     }
   }
@@ -50,10 +50,10 @@ test('SSH command quoting retains arguments literally', async () => {
 });
 
 test('Docker configuration retains defaults and merges named environments and explicit env files', async t => {
-  const cwd = await mkdtemp(join(tmpdir(), 'dev-now-config-test-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'agent-env-config-test-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   await writeFile(join(cwd, '.env.review'), 'FILE_ONLY=literal\nOVERRIDE=file\n');
-  await writeFile(join(cwd, 'dev-now.json'), JSON.stringify({
+  await writeFile(join(cwd, 'agent-env.json'), JSON.stringify({
     name: 'configured', provider: 'docker', env: { OVERRIDE: 'global', PROCESS: { env: 'PATH' } },
     services: { web: { image: 'node:22', port: 3000, env: { OVERRIDE: 'service' } } },
     environments: { review: { envFiles: '.env.review', services: { web: { port: 4000 } } }, custom: { name: 'custom-instance' } },

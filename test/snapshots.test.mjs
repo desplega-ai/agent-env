@@ -11,7 +11,7 @@ import { snapshotInstance, restoreSnapshot } from '../src/snapshots.mjs';
 const provider = new DockerProvider();
 const image = 'busybox:1.37';
 test('Compose snapshot rejects anonymous volumes before export and supports explicit omission', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'dev-now-anonymous-snapshot-'));
+  const directory = await mkdtemp(join(tmpdir(), 'agent-env-anonymous-snapshot-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const compose = new ComposeProvider();
   const spec = { name: 'test', owner: 'test-owner', services: { worker: { composeService: 'worker' } }, compose: { model: { services: { worker: { volumes: [{ type: 'volume', target: '/data' }] } } } } };
@@ -35,14 +35,14 @@ try {
 } catch (error) { unavailable = `Docker and the existing ${image} image are required: ${error.message}`; }
 
 async function fixture(t, count = 1, compose = false) {
-  const directory = await mkdtemp(join(tmpdir(), 'dev-now-snapshots-test-'));
+  const directory = await mkdtemp(join(tmpdir(), 'agent-env-snapshots-test-'));
   const owner = `test-${randomUUID().slice(0, 8)}`;
   const spec = { owner, name: 'source', provider: compose ? 'compose' : 'docker', cwd: directory, services: {} };
   const handle = { spec, workspace: directory, services: {} };
   const containers = [], volumes = [];
   t.after(async () => {
     for (const name of containers.reverse()) await provider.docker(spec, ['rm', '-f', name]).catch(() => {});
-    const owned = (await provider.docker(spec, ['volume', 'ls', '-q', '--filter', `label=dev-now.owner=${owner}`])).split(/\s+/).filter(Boolean);
+    const owned = (await provider.docker(spec, ['volume', 'ls', '-q', '--filter', `label=agent-env.owner=${owner}`])).split(/\s+/).filter(Boolean);
     for (const name of new Set([...volumes, ...owned])) await provider.docker(spec, ['volume', 'rm', name]).catch(() => {});
     await rm(directory, { recursive: true, force: true });
   });
@@ -52,7 +52,7 @@ async function fixture(t, count = 1, compose = false) {
     const volume = compose ? `${owner}_data_${i}` : provider.volume(spec, service, 'data');
     const container = `${provider.prefix(spec)}-${service}`;
     volumes.push(volume); containers.push(container);
-    await provider.docker(spec, ['volume', 'create', '--label', compose ? `com.docker.compose.project=${owner}` : `dev-now.owner=${owner}`, volume]);
+    await provider.docker(spec, ['volume', 'create', '--label', compose ? `com.docker.compose.project=${owner}` : `agent-env.owner=${owner}`, volume]);
     await provider.docker(spec, ['run', '--rm', '--mount', `type=volume,src=${volume},dst=/data`, image, 'sh', '-c', `mkdir -p /data/nested /data/.bin; printf '%s' ${Buffer.from([0, 255, 1, 254, 10]).toString('base64')} | base64 -d > /data/nested/value; ln -s nested/value /data/link; ln -s ../nested/value /data/.bin/runner; ln /data/nested/value /data/hard; touch /data/nested/${'x'.repeat(120)}; ln -s nested/${'x'.repeat(120)} /data/long-link`]);
     await provider.docker(spec, ['create', '--name', container, ...(compose ? ['--label', `com.docker.compose.project=${owner}`] : []), '--mount', `type=volume,src=${volume},dst=/data`, '--mount', `type=bind,src=${directory},dst=/workspace`, '-e', 'SECRET=never-in-manifest', image, 'sleep', '600']);
     handle.services[service] = compose ? { containers: [container] } : { container };
@@ -217,7 +217,7 @@ function tar(entries) {
 }
 
 test('restore rejects unsafe tar entries even when their checksums match', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'dev-now-snapshots-malicious-'));
+  const directory = await mkdtemp(join(tmpdir(), 'agent-env-snapshots-malicious-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const cases = [
     [{ path: '../escape' }], [{ path: '/escape' }], [{ path: 'link', type: '2', target: '../escape' }],
@@ -236,7 +236,7 @@ test('restore rejects unsafe tar entries even when their checksums match', async
   ambiguousFormat.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148);
   archives.push(ambiguousFormat);
   for (const archive of archives) {
-    const manifest = { format: 'dev-now-snapshot', version: 1, omittedMounts: [], volumes: [{ id: 'v0', sourceName: 'source', archive: 'v0.tar', mounts: [{ service: 'db', target: '/data' }], bytes: archive.length, sha256: createHash('sha256').update(archive).digest('hex') }] };
+    const manifest = { format: 'agent-env-snapshot', version: 1, omittedMounts: [], volumes: [{ id: 'v0', sourceName: 'source', archive: 'v0.tar', mounts: [{ service: 'db', target: '/data' }], bytes: archive.length, sha256: createHash('sha256').update(archive).digest('hex') }] };
     await writeFile(join(directory, 'manifest.json'), JSON.stringify(manifest));
     await writeFile(join(directory, 'v0.tar'), archive);
     const noAllocation = { docker() { throw new Error('UNEXPECTED DOCKER ACCESS'); } };
@@ -245,9 +245,9 @@ test('restore rejects unsafe tar entries even when their checksums match', async
 });
 
 test('restore rejects manifest paths, unsupported versions, and truncated archives before Docker access', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'dev-now-snapshots-manifest-'));
+  const directory = await mkdtemp(join(tmpdir(), 'agent-env-snapshots-manifest-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const manifest = { format: 'dev-now-snapshot', version: 99, omittedMounts: [], volumes: [] };
+  const manifest = { format: 'agent-env-snapshot', version: 99, omittedMounts: [], volumes: [] };
   await writeFile(join(directory, 'manifest.json'), JSON.stringify(manifest));
   await assert.rejects(restoreSnapshot({}, directory, {}), /version/);
   const archive = tar([{ path: 'good' }]).subarray(0, 1024);

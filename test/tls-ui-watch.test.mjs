@@ -16,7 +16,7 @@ import { run } from '../src/system.mjs';
 import { createPrivateKey, X509Certificate } from 'node:crypto';
 
 test('concurrent TLS processes preserve one matching CA and restrict its signing scope', async t => {
-  const directory = await mkdtemp('/tmp/dev-now-tls-race-');
+  const directory = await mkdtemp('/tmp/agent-env-tls-race-');
   t.after(() => rm(directory, { recursive: true, force: true }));
   const module = new URL('../src/tls.mjs', import.meta.url).href;
   await Promise.all(Array.from({ length: 4 }, (_, index) => run(process.execPath, ['--input-type=module', '-e', `import {ensureTls} from ${JSON.stringify(module)}; await ensureTls(${JSON.stringify(directory)}, ['host${index}.localhost']);`])));
@@ -44,7 +44,7 @@ test('HTTPS refuses colliding instance and service aliases', () => {
 });
 
 test('HTTPS validates the private CA and serves HTTP/1.1 and HTTP/2', async t => {
-  const directory = await mkdtemp('/tmp/dev-now-tls-');
+  const directory = await mkdtemp('/tmp/agent-env-tls-');
   t.after(() => rm(directory, { recursive: true, force: true }));
   const tls = await ensureTls(directory, ['demo.localhost']);
   const backend = http.createServer((req, res) => res.end(req.url === '/origin' ? JSON.stringify({ host: req.headers.host, origin: req.headers.origin }) : req.headers['x-forwarded-proto']));
@@ -95,7 +95,7 @@ test('dashboard denies foreign hosts, origins, and mutations', async t => {
 test('watcher debounces source edits and excludes credentials and generated paths', async t => {
   assert.equal(shouldSync('apps/web/node_modules/x'), false);
   assert.equal(shouldSync('apps/api/.env.local'), false);
-  const directory = await mkdtemp('/tmp/dev-now-watch-');
+  const directory = await mkdtemp('/tmp/agent-env-watch-');
   let count = 0;
   const stop = watchSource(directory, { changed() { count++; }, debounceMs: 150 });
   t.after(async () => { stop(); await rm(directory, { recursive: true, force: true }); });

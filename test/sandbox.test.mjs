@@ -20,7 +20,7 @@ const minimum = overrides => ({
 });
 
 test('local ESM adapter implements create, restart, wait, status, connect, and dispose', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'dev-now-sandbox-'));
+  const directory = await mkdtemp(join(tmpdir(), 'agent-env-sandbox-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await writeFile(join(directory, 'adapter.mjs'), `
 export async function createAdapter(options) {

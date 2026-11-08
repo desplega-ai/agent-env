@@ -80,7 +80,7 @@ const composed = await restoreSnapshot(destinationSpec, '/backups/checkpoint-1',
 
 ## Ownership and archive rules
 
-Managed volumes need a matching `dev-now.owner` label or the container's matching `com.docker.compose.project` label.
+Managed volumes need a matching `agent-env.owner` label or the container's matching `com.docker.compose.project` label.
 Only local Docker volumes without driver options qualify for automated export.
 Volumes attached to any container outside the handle are shared, even when that container is stopped.
 The helper rejects those volumes.
@@ -92,7 +92,7 @@ Other bind mounts, tmpfs mounts, external volumes, and shared volumes require se
 `omitUnsupportedMounts: true` records each omission with its service, target, type, and reason.
 The parent must display these omissions to the caller.
 
-`manifest.json` has format `dev-now-snapshot`, version `1`.
+`manifest.json` has format `agent-env-snapshot`, version `1`.
 Each volume record includes its ID, actual source name, service mounts, archive name, SHA-256, and archive byte count.
 One source volume produces one archive, even when several source services mount it.
 The manifest includes only source name, owner, and provider identifiers.
@@ -182,7 +182,7 @@ Credential detection uses conservative filename rules. It cannot detect credenti
 Committed build files remain part of the selected ref.
 Submodule working directories and changes within submodules are not copied.
 
-Ownership records reside in `<git-common-dir>/dev-now-worktrees/<token>.json`.
+Ownership records reside in `<git-common-dir>/agent-env-worktrees/<token>.json`.
 Persist the returned `ownership` object with the instance record.
 Removal checks that record and Git's current repository, path, and branch.
 It refuses dirty worktrees, including ignored files, unless the caller explicitly selects `dirty: 'discard'`.

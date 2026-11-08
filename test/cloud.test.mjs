@@ -8,7 +8,7 @@ import { run as realRun } from '../src/system.mjs';
 
 const spec = (cloud = {}) => ({ owner: 'test-owner', name: 'demo', cwd: '/checkout', provider: 'docker', services: {}, cloud: { provider: 'hetzner', ...cloud } });
 async function setup(t, settings = {}) {
-  const home = await mkdtemp(join(tmpdir(), 'dev-now-cloud-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-env-cloud-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const resources = { server: [], 'primary-ip': [], 'ssh-key': [] };
   const calls = [];
@@ -124,7 +124,7 @@ test('SSH uses pinned host identity, isolated credentials, and private files', a
   assert.match(config, /StrictHostKeyChecking yes/);
   assert.match(config, /IdentityAgent none/);
   assert.match(config, /GlobalKnownHostsFile \/dev\/null/);
-  assert.match(config, /HostKeyAlias dev-now-/);
+  assert.match(config, /HostKeyAlias agent-env-/);
   const effective = await realRun('ssh', ['-G', '-F', result.sshConfig, result.host]);
   assert.match(effective, /stricthostkeychecking true/);
   assert.match(effective, /hostname 203\.0\.113\.8/);
@@ -204,7 +204,7 @@ test('purge rejects changed labels or names before deleting any resources', asyn
   for (const kind of ['server', 'primary-ip', 'ssh-key']) {
     const f = await setup(t);
     const result = await f.manager.prepareCloud(spec());
-    f.resources[kind][0].labels['dev-now.owner'] = 'someone-else';
+    f.resources[kind][0].labels['agent-env.owner'] = 'someone-else';
     await assert.rejects(f.manager.destroyCloud(result), /ownership check/);
     await assert.rejects(f.manager.disposeFailedCloud(result), /ownership check/);
     assert.equal(f.calls.filter(call => call.args[1] === 'delete').length, 0);

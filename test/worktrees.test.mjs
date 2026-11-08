@@ -7,7 +7,7 @@ import { run } from '../src/system.mjs';
 import { createWorktree, removeOwnedWorktree } from '../src/worktrees.mjs';
 
 async function fixture(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'dev-now-worktrees-test-'));
+  const directory = await mkdtemp(join(tmpdir(), 'agent-env-worktrees-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const cwd = join(directory, 'source');
   await mkdir(cwd);

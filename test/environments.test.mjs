@@ -8,7 +8,7 @@ import { listEnvironmentSecrets, loadEnvironment, parseEnvFile, readEnvironmentS
 import { redact } from '../src/runtime.mjs';
 
 async function fixture(t) {
-  const cwd = await mkdtemp(join(tmpdir(), 'dev-now-env-test-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'agent-env-env-test-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   return { cwd, home: join(cwd, 'private'), environment: 'review' };
 }
@@ -69,7 +69,7 @@ test('redaction protects literal values and keeps its replacement text intact', 
 });
 
 test('redaction preserves ordinary literals and masks values from private sources', async t => {
-  const cwd = await mkdtemp(join(tmpdir(), 'dev-now-redaction-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'agent-env-redaction-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   await writeFile(join(cwd, 'explicit.env'), 'FILE_VALUE=file-private\n');
   await setEnvironmentSecret({ cwd, home: cwd, key: 'PRIVATE', fromEnv: 'INPUT', env: { INPUT: 'store-private' } });

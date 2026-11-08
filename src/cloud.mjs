@@ -43,11 +43,11 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
 systemctl enable --now docker
 `;
   // JSON values are valid YAML values and retain all newlines in the private key.
-  return `#cloud-config\nssh_deletekeys: true\nssh_keys:\n  ed25519_private: ${JSON.stringify(hostPrivateKey)}\n  ed25519_public: ${JSON.stringify(hostPublicKey.trim())}\nssh_pwauth: false\ndisable_root: false\nwrite_files:\n  - path: /root/dev-now-bootstrap.sh\n    permissions: '0700'\n    content: ${JSON.stringify(script)}\nruncmd:\n  - [sh, /root/dev-now-bootstrap.sh]\n`;
+  return `#cloud-config\nssh_deletekeys: true\nssh_keys:\n  ed25519_private: ${JSON.stringify(hostPrivateKey)}\n  ed25519_public: ${JSON.stringify(hostPublicKey.trim())}\nssh_pwauth: false\ndisable_root: false\nwrite_files:\n  - path: /root/agent-env-bootstrap.sh\n    permissions: '0700'\n    content: ${JSON.stringify(script)}\nruncmd:\n  - [sh, /root/agent-env-bootstrap.sh]\n`;
 }
 
 export function createCloudManager({
-  home = resolve(process.env.DEV_NOW_HOME ?? join(homedir(), '.local/state/dev-now')),
+  home = resolve(process.env.AGENT_ENV_HOME ?? join(homedir(), '.local/state/agent-env')),
   run = systemRun, delay = systemDelay, now = Date.now, readinessTimeoutMs = 300000,
 } = {}) {
   const root = join(resolve(home), 'cloud');
@@ -58,7 +58,7 @@ export function createCloudManager({
   };
   const directory = identity => join(root, recordKey(identity));
   const recordPath = identity => join(directory(identity), 'record.json');
-  const labels = record => ({ 'dev-now.owner': record.owner, 'dev-now.instance': record.name, 'dev-now.record': record.recordId });
+  const labels = record => ({ 'agent-env.owner': record.owner, 'agent-env.instance': record.name, 'agent-env.record': record.recordId });
   const labelArgs = record => Object.entries(labels(record)).flatMap(([key, value]) => ['--label', `${key}=${value}`]);
   const metadata = record => ({
     ...record.options, owner: record.owner, name: record.name, recordId: record.recordId,
@@ -125,7 +125,7 @@ export function createCloudManager({
     const resources = await hcloud(record, kind, 'list', [], true);
     if (!Array.isArray(resources)) throw new Error(`hcloud ${kind} list returned invalid resources.`);
     const field = fields[kind];
-    const owned = resources.filter(resource => resource.labels?.['dev-now.record'] === record.recordId);
+    const owned = resources.filter(resource => resource.labels?.['agent-env.record'] === record.recordId);
     if (owned.length > 1) throw new Error(`Cloud has multiple ${kind} resources for this record. Refuse automatic changes.`);
     const resource = record[field] ? resources.find(item => item.id === record[field]) : owned[0];
     if (record[field] && owned.some(item => item.id !== record[field])) throw new Error(`Cloud ${kind} ID conflicts with its ownership record.`);
@@ -150,7 +150,7 @@ export function createCloudManager({
   async function createResource(record, kind, args) {
     const existing = await reconcile(record, kind);
     if (existing) return existing;
-    if (record.attempted[kind]) throw new Error(`Cloud ${kind} creation has an uncertain result or a missing resource. Run dev-now rm ${record.name} --purge before replacement.`);
+    if (record.attempted[kind]) throw new Error(`Cloud ${kind} creation has an uncertain result or a missing resource. Run agent-env rm ${record.name} --purge before replacement.`);
     // Store intent before the external side effect, including requests with lost responses.
     record.attempted[kind] = true;
     await save(record);
@@ -167,7 +167,7 @@ export function createCloudManager({
     const publicExists = await exists(`${path}.pub`);
     if (privateExists !== publicExists) throw new Error('Cloud key pair is incomplete. Dispose the failed start before retry.');
     if (!privateExists) {
-      await command('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'dev-now', '-f', path]);
+      await command('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'agent-env', '-f', path]);
     }
     await chmod(path, 0o600);
     return { privateKey: await readFile(path, 'utf8'), publicKey: await readFile(`${path}.pub`, 'utf8') };
@@ -176,7 +176,7 @@ export function createCloudManager({
     const address = server.public_net?.ipv4?.ip;
     if (isIP(address ?? '') !== 4) throw new Error('Cloud server has no public IPv4 address.');
     const dir = directory(record);
-    const alias = `dev-now-${record.recordId}`;
+    const alias = `agent-env-${record.recordId}`;
     const publicKey = (await readFile(join(dir, 'host-key.pub'), 'utf8')).trim().split(/\s+/).slice(0, 2).join(' ');
     await privateWrite(join(dir, 'known_hosts'), `${alias} ${publicKey}\n`);
     const config = join(dir, 'ssh_config');

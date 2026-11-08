@@ -1,10 +1,10 @@
 {
-  "name": "dev-now",
+  "name": "@desplega.ai/agent-env",
   "version": "0.2.0",
   "description": "Run development services behind stable localhost addresses.",
   "type": "module",
   "bin": {
-    "dev-now": "./bin/dev-now.mjs"
+    "agent-env": "./bin/agent-env.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
@@ -22,7 +22,22 @@
     "bin",
     "src",
     "README.md",
-    "examples"
+    "LICENSE",
+    "examples",
+    "docs",
+    "assets"
   ],
-  "private": true
+  "license": "MIT",
+  "author": "Desplega Labs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/desplega-ai/agent-env.git"
+  },
+  "homepage": "https://github.com/desplega-ai/agent-env#readme",
+  "bugs": {
+    "url": "https://github.com/desplega-ai/agent-env/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

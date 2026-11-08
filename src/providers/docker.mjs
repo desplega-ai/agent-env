@@ -23,7 +23,7 @@ export class DockerProvider {
       : run(args[0], args.slice(1), options);
   }
   docker(spec, args, options) { return this.command(spec, ['docker', ...args], options); }
-  prefix(spec) { return `dev-now-${spec.owner}-${spec.name}`; }
+  prefix(spec) { return `agent-env-${spec.owner}-${spec.name}`; }
   volume(spec, service, name) { return `${this.prefix(spec)}-${service}-${name}`; }
   async sync(handle) {
     const { spec, workspace } = handle;
@@ -33,22 +33,22 @@ export class DockerProvider {
   }
   async create(spec) {
     await this.docker(spec, ['info', '--format', '{{.ServerVersion}}']);
-    const workspace = spec.host ? `${await this.command(spec, ['pwd'])}/.local/share/dev-now/${spec.owner}/${spec.name}` : spec.cwd;
+    const workspace = spec.host ? `${await this.command(spec, ['pwd'])}/.local/share/agent-env/${spec.owner}/${spec.name}` : spec.cwd;
     if (workspace.includes(',')) throw new Error('Workspace paths cannot contain commas.');
     const handle = { spec, workspace, services: {} };
     const newVolumes = [];
     await this.sync(handle);
     const network = this.prefix(spec);
-    await this.docker(spec, ['network', 'create', '--label', `dev-now.owner=${spec.owner}`, network]);
+    await this.docker(spec, ['network', 'create', '--label', `agent-env.owner=${spec.owner}`, network]);
     try {
       for (const [name, service] of Object.entries(spec.services)) {
         const container = `${network}-${name}`;
-        const args = ['run', '-d', '--init', '--name', container, '--label', `dev-now.owner=${spec.owner}`, '--network', network, '--network-alias', name, '-p', `127.0.0.1::${service.containerPort}`, '--mount', `type=bind,src=${workspace},dst=/workspace`, '-w', '/workspace'];
+        const args = ['run', '-d', '--init', '--name', container, '--label', `agent-env.owner=${spec.owner}`, '--network', network, '--network-alias', name, '-p', `127.0.0.1::${service.containerPort}`, '--mount', `type=bind,src=${workspace},dst=/workspace`, '-w', '/workspace'];
         for (const [volume, target] of Object.entries(service.volumes ?? {})) {
           const volumeName = this.volume(spec, name, volume);
           const exists = await this.docker(spec, ['volume', 'ls', '-q', '--filter', `name=^${volumeName}$`]);
           if (!exists) newVolumes.push(volumeName);
-          await this.docker(spec, ['volume', 'create', '--label', `dev-now.owner=${spec.owner}`, volumeName]);
+          await this.docker(spec, ['volume', 'create', '--label', `agent-env.owner=${spec.owner}`, volumeName]);
           args.push('--mount', `type=volume,src=${this.volume(spec, name, volume)},dst=${target}`);
         }
         for (const [key, value] of Object.entries({ HOST: '0.0.0.0', PORT: String(service.containerPort), ...service.env })) args.push('-e', `${key}=${value}`);
@@ -134,7 +134,7 @@ export class DockerProvider {
     const network = this.prefix(handle.spec);
     const networkExists = await this.docker(handle.spec, ['network', 'ls', '-q', '--filter', `name=^${network}$`]);
     if (networkExists) await this.docker(handle.spec, ['network', 'rm', network]);
-    if (handle.spec.host && handle.workspace.endsWith(`/.local/share/dev-now/${handle.spec.owner}/${handle.spec.name}`)) {
+    if (handle.spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${handle.spec.owner}/${handle.spec.name}`)) {
       await this.command(handle.spec, ['rm', '-rf', '--', handle.workspace]);
     }
     if (purge) {
@@ -170,7 +170,7 @@ export class DockerProvider {
     const created = [];
     try {
       for (const { source, destination } of volumes) {
-        await this.docker(spec, ['volume', 'create', '--label', `dev-now.owner=${spec.owner}`, destination]);
+        await this.docker(spec, ['volume', 'create', '--label', `agent-env.owner=${spec.owner}`, destination]);
         created.push(destination);
         await this.docker(spec, ['run', '--rm', '--mount', `type=volume,src=${source},dst=/source,readonly`, '--mount', `type=volume,src=${destination},dst=/destination`, 'alpine:3', 'sh', '-c', 'cp -a /source/. /destination/']);
       }

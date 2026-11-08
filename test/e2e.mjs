@@ -6,11 +6,11 @@ import http from 'node:http';
 import { freePort, delay } from '../src/system.mjs';
 
 const root = resolve(import.meta.dirname, '..');
-const directory = await mkdtemp('/tmp/dev-now-e2e-space ');
-const state = join(directory, '.dev-now');
+const directory = await mkdtemp('/tmp/agent-env-e2e-space ');
+const state = join(directory, '.agent-env');
 const webPort = await freePort(), dbPort = await freePort();
-const remote = process.env.DEV_NOW_TEST_SSH;
-const sshConfig = process.env.DEV_NOW_TEST_SSH_CONFIG;
+const remote = process.env.AGENT_ENV_TEST_SSH;
+const sshConfig = process.env.AGENT_ENV_TEST_SSH_CONFIG;
 const options = [...(remote ? ['--ssh', remote, ...(sshConfig ? ['--ssh-config', sshConfig] : [])] : []), '--no-watch'];
 const config = {
   services: {
@@ -18,11 +18,11 @@ const config = {
     db: { image: 'postgres:16-alpine', port: dbPort, containerPort: 5432, protocol: 'tcp', health: 'pg_isready -h 127.0.0.1 -U postgres', env: { POSTGRES_PASSWORD: 'test-only', POSTGRES_DB: 'app' }, volumes: { data: '/var/lib/postgresql/data' } },
   },
 };
-await writeFile(join(directory, 'dev-now.json'), JSON.stringify(config));
+await writeFile(join(directory, 'agent-env.json'), JSON.stringify(config));
 await writeFile(join(directory, 'index.html'), 'version-one');
 await writeFile(join(directory, '.env'), 'TEST_SECRET=do-not-sync');
 const invoke = (args, ok = true) => new Promise((resolveResult, reject) => {
-  const child = spawn(process.execPath, [join(root, 'bin/dev-now.mjs'), ...args], { cwd: directory, env: { ...process.env, DEV_NOW_HOME: state }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [join(root, 'bin/agent-env.mjs'), ...args], { cwd: directory, env: { ...process.env, AGENT_ENV_HOME: state }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = '';
   child.stdout.on('data', data => { stdout += data; });
   child.stderr.on('data', data => { stderr += data; });

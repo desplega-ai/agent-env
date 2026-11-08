@@ -48,7 +48,7 @@ export function parseEnvFile(source) {
 export function resolveEnvironment(config, name = 'default') {
   if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,47}$/.test(name)) throw new Error('Use a valid environment name.');
   const environments = config.environments ?? {};
-  if (name !== 'default' && !Object.hasOwn(environments, name)) throw new Error(`Environment ${name} is not defined in dev-now.json.`);
+  if (name !== 'default' && !Object.hasOwn(environments, name)) throw new Error(`Environment ${name} is not defined in agent-env.json.`);
   const { environments: ignored, ...base } = config;
   const overlay = Object.hasOwn(environments, name) ? environments[name] : {};
   if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)) throw new Error('Environment definitions must be objects.');
@@ -67,7 +67,7 @@ async function storePath({ cwd = process.cwd(), environment = 'default', home } 
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(environment)) throw new Error('Use a valid environment name.');
   const project = await realpath(cwd);
   const digest = createHash('sha256').update(project).digest('hex');
-  const root = resolve(home ?? process.env.DEV_NOW_HOME ?? join(homedir(), '.local/state/dev-now'));
+  const root = resolve(home ?? process.env.AGENT_ENV_HOME ?? join(homedir(), '.local/state/agent-env'));
   return join(root, 'secrets', digest, `${environment}.json`);
 }
 export async function readEnvironmentSecrets(options = {}) {

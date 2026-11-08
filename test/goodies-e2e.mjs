@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { run, freePort } from '../src/system.mjs';
-const cwd = await mkdtemp('/tmp/dev-now-goodies-live-');
-const cli = async args => JSON.parse(await run(process.execPath, [new URL('../bin/dev-now.mjs', import.meta.url).pathname, '--json', ...args], { cwd, env: { ...process.env, DEV_NOW_HOME: join(cwd, '.dev-now') } }));
+const cwd = await mkdtemp('/tmp/agent-env-goodies-live-');
+const cli = async args => JSON.parse(await run(process.execPath, [new URL('../bin/agent-env.mjs', import.meta.url).pathname, '--json', ...args], { cwd, env: { ...process.env, AGENT_ENV_HOME: join(cwd, '.agent-env') } }));
 try {
-  if (process.env.DEV_NOW_TEST_COMPOSE_GOODIES) await writeFile(join(cwd, 'compose.yaml'), 'services:\n  worker:\n    image: busybox:1.37\n    command: [sleep, "3600"]\n');
+  if (process.env.AGENT_ENV_TEST_COMPOSE_GOODIES) await writeFile(join(cwd, 'compose.yaml'), 'services:\n  worker:\n    image: busybox:1.37\n    command: [sleep, "3600"]\n');
   await cli(['add', 'postgres', '--port', String(await freePort())]);
   await cli(['add', 'redis', '--port', String(await freePort())]);
   await cli(['up', '--name', 'goodies']);

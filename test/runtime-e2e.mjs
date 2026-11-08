@@ -6,13 +6,13 @@ import https from 'node:https';
 import { run, freePort, delay } from '../src/system.mjs';
 
 const root = resolve(import.meta.dirname, '..');
-const cwd = await mkdtemp('/tmp/dev-now-runtime-');
-const home = join(cwd, '.dev-now');
+const cwd = await mkdtemp('/tmp/agent-env-runtime-');
+const home = join(cwd, '.agent-env');
 const port = await freePort(), tlsPort = await freePort();
-const host = process.env.DEV_NOW_TEST_SSH;
-const options = [...(host ? ['--ssh', host, '--ssh-config', process.env.DEV_NOW_TEST_SSH_CONFIG] : []), ...(process.env.DEV_NOW_TEST_SANDBOX ? ['--provider', 'sandbox', '--adapter', 'docker'] : [])];
-const cli = async args => JSON.parse(await run(process.execPath, [join(root, 'bin/dev-now.mjs'), '--json', ...args], { cwd, env: { ...process.env, DEV_NOW_HOME: home } }));
-await writeFile(join(cwd, 'dev-now.json'), JSON.stringify({ services: { web: { image: 'busybox:1.37', port, containerPort: 3000, command: 'httpd -f -p 3000 -h /workspace', env: { EXAMPLE_SECRET: 'never-show-this-value' } } } }));
+const host = process.env.AGENT_ENV_TEST_SSH;
+const options = [...(host ? ['--ssh', host, '--ssh-config', process.env.AGENT_ENV_TEST_SSH_CONFIG] : []), ...(process.env.AGENT_ENV_TEST_SANDBOX ? ['--provider', 'sandbox', '--adapter', 'docker'] : [])];
+const cli = async args => JSON.parse(await run(process.execPath, [join(root, 'bin/agent-env.mjs'), '--json', ...args], { cwd, env: { ...process.env, AGENT_ENV_HOME: home } }));
+await writeFile(join(cwd, 'agent-env.json'), JSON.stringify({ services: { web: { image: 'busybox:1.37', port, containerPort: 3000, command: 'httpd -f -p 3000 -h /workspace', env: { EXAMPLE_SECRET: 'never-show-this-value' } } } }));
 await writeFile(join(cwd, 'index.html'), 'before');
 async function readHttp() {
   const response = await fetch(`http://127.0.0.1:${port}`, { headers: { host: `runtime.localhost:${port}` } });

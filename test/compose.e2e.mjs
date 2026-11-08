@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { run } from '../src/system.mjs';
 
-const directory = await mkdtemp(join(tmpdir(), 'dev-now-compose-e2e-'));
-process.env.DEV_NOW_HOME = join(directory, 'private-state');
+const directory = await mkdtemp(join(tmpdir(), 'agent-env-compose-e2e-'));
+process.env.AGENT_ENV_HOME = join(directory, 'private-state');
 const { loadSpec } = await import('../src/config.mjs');
 const { ComposeProvider } = await import('../src/providers/compose.mjs');
 const { setEnvironmentSecret } = await import('../src/environments.mjs');
@@ -24,7 +24,7 @@ try {
   const spec = async (name, options = {}) => ({ ...await loadSpec({ cwd, name, ...options }), owner });
   const create = async (name, options) => {
     const configuration = await spec(name, options);
-    images.add(`${provider.prefix(configuration)}-web:dev-now`);
+    images.add(`${provider.prefix(configuration)}-web:agent-env`);
     const handle = await provider.create(configuration);
     handles.push(handle);
     return handle;
@@ -94,8 +94,8 @@ try {
   await run('docker', ['volume', 'inspect', failedVolume]);
 
   // A purge must not remove resources declared external.
-  externalVolume = `dev-now-compose-e2e-${process.pid}-external-data`;
-  externalNetwork = `dev-now-compose-e2e-${process.pid}-external-net`;
+  externalVolume = `agent-env-compose-e2e-${process.pid}-external-data`;
+  externalNetwork = `agent-env-compose-e2e-${process.pid}-external-net`;
   await run('docker', ['volume', 'create', externalVolume]);
   await run('docker', ['network', 'create', externalNetwork]);
   await writeFile(join(cwd, 'external.yaml'), `services:\n  worker:\n    image: busybox:1.37\n    command: ["sleep", "3600"]\n    volumes: ["data:/data"]\nvolumes:\n  data:\n    external: true\n    name: ${externalVolume}\nnetworks:\n  default:\n    external: true\n    name: ${externalNetwork}\n`);

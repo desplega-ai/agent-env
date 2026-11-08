@@ -57,7 +57,7 @@ export function validate(spec) {
 export async function loadSpec(options = {}, command = []) {
   const cwd = await realpath(options.cwd ?? process.cwd());
   let config = {};
-  try { config = JSON.parse(await readFile(resolve(cwd, options.config ?? 'dev-now.json'), 'utf8')); }
+  try { config = JSON.parse(await readFile(resolve(cwd, options.config ?? 'agent-env.json'), 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT' || options.config) throw error; }
   if (options.provider) config.provider = options.provider;
   const names = stringList(options.env, 'env');
@@ -96,7 +96,7 @@ export async function loadSpec(options = {}, command = []) {
   const composeFiles = stringList(options['compose-file'] ?? config.compose?.files ?? config.composeFiles, 'compose-file');
   const detected = !config.provider && !config.services && !command.length ? await detectComposeFiles(cwd) : [];
   if (!command.length && (spec.provider === 'compose' || composeFiles.length || detected.length)) {
-    if (config.services) throw new Error('Use Compose override files for service configuration. Use env and compose.routes in dev-now.json.');
+    if (config.services) throw new Error('Use Compose override files for service configuration. Use env and compose.routes in agent-env.json.');
     spec.provider = 'compose';
     spec.compose = {
       ...config.compose,

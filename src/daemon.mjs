@@ -113,7 +113,7 @@ async function connect(handle) {
 }
 function instance(name) {
   const handle = Object.hasOwn(state.instances, name) ? state.instances[name] : undefined;
-  if (!handle) throw new Error(`Instance ${name} does not exist. Run dev-now list.`);
+  if (!handle) throw new Error(`Instance ${name} does not exist. Run agent-env list.`);
   return handle;
 }
 function summary(handle) {
@@ -179,7 +179,7 @@ async function action(message) {
       return copy;
     };
     if (handle && !handle.removed && !isDeepStrictEqual(identitySpec(handle.spec), identitySpec(spec))) {
-      throw new Error(`Configuration changed for ${spec.name}. Run dev-now rm ${spec.name}, then up. Volumes remain.`);
+      throw new Error(`Configuration changed for ${spec.name}. Run agent-env rm ${spec.name}, then up. Volumes remain.`);
     }
     try {
       await reserve(spec);
@@ -236,7 +236,7 @@ async function action(message) {
   }
   if (type === 'use') {
     const handle = instance(name);
-    if (!summary(handle).connected) throw new Error('This instance has no active connection. Run dev-now up first.');
+    if (!summary(handle).connected) throw new Error('This instance has no active connection. Run agent-env up first.');
     for (const service of Object.values(handle.services)) {
       const route = routes.get(service.port);
       if (!route) continue;
@@ -251,7 +251,7 @@ async function action(message) {
     const result = await extras.enableHttps(message.port ?? 8443);
     state.httpsPort = result.port;
     await save();
-    return { ...result, message: `HTTPS enabled on port ${result.port}. Trust the CA with dev-now trust.` };
+    return { ...result, message: `HTTPS enabled on port ${result.port}. Trust the CA with agent-env trust.` };
   }
   if (type === 'ui') {
     const result = await extras.enableUi(message.port ?? 4780);
@@ -365,7 +365,7 @@ async function action(message) {
     const handle = instance(name);
     const provider = providerFor(handle.spec);
     activity(name);
-    if (handle.sleeping) throw new Error('The cloud machine is sleeping. Run dev-now up first.');
+    if (handle.sleeping) throw new Error('The cloud machine is sleeping. Run agent-env up first.');
     if (type === 'sync') { await provider.sync(handle); return { message: 'Files synchronized.' }; }
     const service = message.service ?? Object.keys(handle.services)[0];
     if (!handle.services[service]) throw new Error(`Service ${service} does not exist.`);

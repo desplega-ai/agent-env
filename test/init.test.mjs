@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createInitialConfig, initialize } from '../src/init.mjs';
 
 async function fixture(t, manifest) {
-  const cwd = await mkdtemp(join(tmpdir(), 'dev-now-init-test-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'agent-env-init-test-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   if (manifest) await writeFile(join(cwd, 'package.json'), JSON.stringify(manifest));
   return cwd;

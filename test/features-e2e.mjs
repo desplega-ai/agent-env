@@ -4,25 +4,25 @@ import { join, resolve } from 'node:path';
 import { run, freePort } from '../src/system.mjs';
 
 const root = resolve(import.meta.dirname, '..');
-const directory = await mkdtemp('/tmp/dev-now-features-');
+const directory = await mkdtemp('/tmp/agent-env-features-');
 const cwd = join(directory, 'checkout'), home = join(directory, 'state');
-process.env.DEV_NOW_HOME = home;
+process.env.AGENT_ENV_HOME = home;
 await run('git', ['init', '-q', cwd]);
 const port = await freePort();
-const remote = process.env.DEV_NOW_TEST_SSH;
-const remoteOptions = remote ? ['--ssh', remote, '--ssh-config', process.env.DEV_NOW_TEST_SSH_CONFIG] : [];
-const storage = process.env.DEV_NOW_TEST_S3 ?? join(directory, 'snapshot');
-const endpoint = process.env.DEV_NOW_TEST_S3_ENDPOINT;
+const remote = process.env.AGENT_ENV_TEST_SSH;
+const remoteOptions = remote ? ['--ssh', remote, '--ssh-config', process.env.AGENT_ENV_TEST_SSH_CONFIG] : [];
+const storage = process.env.AGENT_ENV_TEST_S3 ?? join(directory, 'snapshot');
+const endpoint = process.env.AGENT_ENV_TEST_S3_ENDPOINT;
 const storageOptions = endpoint ? ['--endpoint', endpoint] : [];
-const env = { ...process.env, DEV_NOW_HOME: home, DEV_NOW_TEST_PASSWORD: 'private-e2e-value-$-literal' };
-const cli = async (args, directory = cwd) => JSON.parse(await run(process.execPath, [join(root, 'bin/dev-now.mjs'), '--json', ...args], { cwd: directory, env }));
+const env = { ...process.env, AGENT_ENV_HOME: home, AGENT_ENV_TEST_PASSWORD: 'private-e2e-value-$-literal' };
+const cli = async (args, directory = cwd) => JSON.parse(await run(process.execPath, [join(root, 'bin/agent-env.mjs'), '--json', ...args], { cwd: directory, env }));
 const exec = async (name, service, args) => (await cli(['exec', name, '--service', service, '--', ...args])).output;
 const sql = (name, query) => exec(name, 'db', ['psql', '-U', 'postgres', '-d', 'app', '-Atc', query]);
 const images = new Set();
 const docker = async args => {
   const { DockerProvider } = await import('../src/providers/docker.mjs');
   const provider = new DockerProvider();
-  try { return await provider.docker({ host: remote, sshConfig: process.env.DEV_NOW_TEST_SSH_CONFIG }, args); }
+  try { return await provider.docker({ host: remote, sshConfig: process.env.AGENT_ENV_TEST_SSH_CONFIG }, args); }
   finally { await provider.dispose(); }
 };
 try {
@@ -51,14 +51,14 @@ volumes:
   await writeFile(join(cwd, 'Dockerfile'), 'FROM busybox:1.37\n');
   await writeFile(join(cwd, 'index.html'), 'initial source');
   await cli(['init']);
-  const config = JSON.parse(await readFile(join(cwd, 'dev-now.json')));
+  const config = JSON.parse(await readFile(join(cwd, 'agent-env.json')));
   config.environments = { review: { env: { POSTGRES_PASSWORD: { secret: 'POSTGRES_PASSWORD' } } } };
-  await writeFile(join(cwd, 'dev-now.json'), JSON.stringify(config));
+  await writeFile(join(cwd, 'agent-env.json'), JSON.stringify(config));
   await run('git', ['-C', cwd, 'add', '.']);
-  await run('git', ['-C', cwd, '-c', 'user.name=dev-now E2E', '-c', 'user.email=test@localhost', 'commit', '-qm', 'Test fixture']);
+  await run('git', ['-C', cwd, '-c', 'user.name=agent-env E2E', '-c', 'user.email=test@localhost', 'commit', '-qm', 'Test fixture']);
   await writeFile(join(cwd, 'index.html'), 'dirty source copied');
   await writeFile(join(cwd, '.env.local'), 'DO_NOT_COPY=private');
-  await cli(['env', 'set', 'POSTGRES_PASSWORD', '--env', 'review', '--from-env', 'DEV_NOW_TEST_PASSWORD']);
+  await cli(['env', 'set', 'POSTGRES_PASSWORD', '--env', 'review', '--from-env', 'AGENT_ENV_TEST_PASSWORD']);
   assert.deepEqual(await cli(['env', 'list', '--env', 'review']), ['POSTGRES_PASSWORD']);
   const first = await cli(['up', '--name', 'alpha', '--env', 'review', ...remoteOptions]);
   assert.equal(first.services.db.url, null);
@@ -84,7 +84,7 @@ volumes:
   await assert.rejects(exec('beta', 'db', ['sh', '-c', 'printf "application port 5173: %s" "$POSTGRES_PASSWORD"; exit 7']), error => {
     assert.equal(error.exitCode, 7);
     assert.match(error.message, /application port 5173: \[redacted\]/);
-    assert.ok(!error.message.includes(env.DEV_NOW_TEST_PASSWORD));
+    assert.ok(!error.message.includes(env.AGENT_ENV_TEST_PASSWORD));
     return true;
   });
   await cli(['restore', storage, '--name', 'restored', '--env', 'review', ...remoteOptions, ...storageOptions]);
@@ -94,11 +94,11 @@ volumes:
   assert.equal(await sql('alpha', 'SELECT value FROM evidence'), 'persisted');
   assert.deepEqual(await readFile(join(cwd, 'compose.yaml')), sourceFile);
   const state = JSON.parse(await readFile(join(home, 'state.json')));
-  for (const handle of Object.values(state.instances)) images.add(`dev-now-${handle.spec.owner}-${handle.spec.name}-web:dev-now`);
+  for (const handle of Object.values(state.instances)) images.add(`agent-env-${handle.spec.owner}-${handle.spec.name}-web:agent-env`);
   console.log(`PASS: ${remote ? 'SSH' : 'local'} Compose CLI, smart init, environments, secret redaction, ${storage.startsWith('s3:') ? 'S3' : 'local'} snapshots, restore, and Git/data fork isolation.`);
 } finally {
   const state = await readFile(join(home, 'state.json'), 'utf8').then(JSON.parse).catch(() => ({ instances: {} }));
-  for (const handle of Object.values(state.instances)) images.add(`dev-now-${handle.spec.owner}-${handle.spec.name}-web:dev-now`);
+  for (const handle of Object.values(state.instances)) images.add(`agent-env-${handle.spec.owner}-${handle.spec.name}-web:agent-env`);
   try { await cli(['rm', '--all', '--purge', '--remove-worktree', '--discard-worktree']); }
   finally { await cli(['daemon', 'stop']); }
   for (const image of images) await docker(['image', 'rm', image]).catch(() => {});

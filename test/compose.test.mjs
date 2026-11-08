@@ -27,7 +27,7 @@ test('remote Compose rejects excluded bind and build paths but accepts nested so
   assert.equal(model.services.worker.volumes[0].source, '/remote/workspace/src/build');
 });
 async function fixture(t, yaml) {
-  const cwd = await mkdtemp(join(tmpdir(), 'dev-now-compose-test-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'agent-env-compose-test-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   if (yaml) await writeFile(join(cwd, 'compose.yaml'), yaml);
   return cwd;
@@ -68,7 +68,7 @@ test('unsupported features produce explicit errors before provisioning', () => {
 test('loadSpec normalizes real Compose files, selected profiles, environment files, and names', { skip: !composeAvailable }, async t => {
   const cwd = await fixture(t, 'services:\n  web:\n    image: busybox:1.37\n    ports: ["${PUBLIC_PORT}:3000"]\n  db:\n    image: postgres:16-alpine\n  tools:\n    image: busybox:1.37\n    profiles: [tools]\n');
   await writeFile(join(cwd, '.env.review'), 'PUBLIC_PORT=4111\n');
-  await writeFile(join(cwd, 'dev-now.json'), JSON.stringify({ environments: { review: { envFiles: ['.env.review'] } } }));
+  await writeFile(join(cwd, 'agent-env.json'), JSON.stringify({ environments: { review: { envFiles: ['.env.review'] } } }));
   const spec = await loadSpec({ cwd, env: ['review'], profile: ['tools'], 'compose-file': ['compose.yaml'] });
   assert.equal(spec.provider, 'compose');
   assert.equal(spec.services.web.port, 4111);
@@ -87,8 +87,8 @@ test('private normalization replaces names and ports, isolates resources, and re
   assert.ok(runtime.services.web.networks.default.aliases.includes('fixed-name'));
   assert.equal(runtime.services.web.ports[0].host_ip, '127.0.0.1');
   assert.equal(runtime.services.web.ports[0].published, '0');
-  assert.equal(runtime.volumes.data.name, 'dev-now-test-owner-' + spec.name + '-data');
-  assert.equal(runtime.networks.default.name, 'dev-now-test-owner-' + spec.name + '-default');
+  assert.equal(runtime.volumes.data.name, 'agent-env-test-owner-' + spec.name + '-data');
+  assert.equal(runtime.networks.default.name, 'agent-env-test-owner-' + spec.name + '-default');
   const roundtrip = JSON.parse(await run('docker', ['compose', '-f', prepared.localFile, 'config', '--format', 'json']));
   assert.ok(roundtrip.services.web.environment.LITERAL === 'value-$$DOLLAR');
   assert.equal(await readFile(join(cwd, 'compose.yaml'), 'utf8'), source);
@@ -110,7 +110,7 @@ test('Compose redaction preserves literals and captures service environment file
   const cwd = await fixture(t, 'services:\n  worker:\n    image: busybox:1.37\n    env_file: private.env\n    secrets: [file-secret]\n    environment:\n      HOST: 0.0.0.0\n      PORT: "5173"\n      FLAG: "1"\n      POSTGRES_DB: app\nsecrets:\n  file-secret:\n    file: private.txt\n');
   await writeFile(join(cwd, 'private.env'), 'UNSET_VALUE\nFILE_VALUE=file-private\nEXPANDED=${POSTGRES_DB}-private\nPORT=1000\n');
   await writeFile(join(cwd, 'private.txt'), 'file-secret-private\n');
-  await writeFile(join(cwd, 'dev-now.json'), JSON.stringify({ env: { POSTGRES_DB: 'app', PORT: '5173' } }));
+  await writeFile(join(cwd, 'agent-env.json'), JSON.stringify({ env: { POSTGRES_DB: 'app', PORT: '5173' } }));
   const previous = process.env.PORT;
   process.env.PORT = '1234';
   t.after(() => { if (previous === undefined) delete process.env.PORT; else process.env.PORT = previous; });
@@ -130,7 +130,7 @@ test('retained Compose volumes can be purged without the removed runtime file', 
   provider.docker = async (_spec, args) => {
     calls.push(args);
     if (args[1] === 'ls') return volume;
-    if (args[1] === 'inspect') return JSON.stringify([{ Name: volume, Labels: { 'dev-now.owner': owner, 'com.docker.compose.project': provider.prefix(spec) } }]);
+    if (args[1] === 'inspect') return JSON.stringify([{ Name: volume, Labels: { 'agent-env.owner': owner, 'com.docker.compose.project': provider.prefix(spec) } }]);
     if (args[1] === 'rm') return '';
     assert.fail(`Unexpected Docker operation: ${args.join(' ')}`);
   };
@@ -162,17 +162,17 @@ test('services that share a built image use one isolated image tag', { skip: !co
   const prepared = await new ComposeProvider().prepare(spec, cwd, await fixture(t));
   const runtime = JSON.parse(await readFile(prepared.localFile, 'utf8'));
   assert.equal(runtime.services.web.image, runtime.services.worker.image);
-  assert.ok(runtime.services.web.image.startsWith(`dev-now-test-owner-${spec.name}-image-`));
+  assert.ok(runtime.services.web.image.startsWith(`agent-env-test-owner-${spec.name}-image-`));
   assert.equal(runtime.services.web.pull_policy, 'build');
   assert.equal(runtime.services.worker.pull_policy, 'never');
 });
 test('the resolved model survives shell changes and makes source changes visible to the daemon', { skip: !composeAvailable }, async t => {
-  const cwd = await fixture(t, 'services:\n  worker:\n    image: busybox:1.37\n    command: ["echo", "${DEV_NOW_TEST_INPUT}"]\n');
-  const previous = process.env.DEV_NOW_TEST_INPUT;
-  t.after(() => { if (previous === undefined) delete process.env.DEV_NOW_TEST_INPUT; else process.env.DEV_NOW_TEST_INPUT = previous; });
-  process.env.DEV_NOW_TEST_INPUT = 'first-value';
+  const cwd = await fixture(t, 'services:\n  worker:\n    image: busybox:1.37\n    command: ["echo", "${AGENT_ENV_TEST_INPUT}"]\n');
+  const previous = process.env.AGENT_ENV_TEST_INPUT;
+  t.after(() => { if (previous === undefined) delete process.env.AGENT_ENV_TEST_INPUT; else process.env.AGENT_ENV_TEST_INPUT = previous; });
+  process.env.AGENT_ENV_TEST_INPUT = 'first-value';
   const spec = { ...await loadSpec({ cwd }), owner: 'test-owner' };
-  process.env.DEV_NOW_TEST_INPUT = 'second-value';
+  process.env.AGENT_ENV_TEST_INPUT = 'second-value';
   const prepared = await new ComposeProvider().prepare(spec, cwd, await fixture(t));
   const runtime = JSON.parse(await readFile(prepared.localFile, 'utf8'));
   assert.ok(runtime.services.worker.command.includes('first-value'));
@@ -197,7 +197,7 @@ test('connect skips internal services and removal never forces external resource
   assert.deepEqual((await provider.connect({ spec: {}, services })).map(({ name, backendPort }) => ({ name, backendPort })), [{ name: 'web', backendPort: 4111 }]);
   let args;
   provider.compose = async (handle, value) => { args = value; };
-  const directory = await mkdtemp(join(tmpdir(), 'dev-now-compose-remove-test-'));
+  const directory = await mkdtemp(join(tmpdir(), 'agent-env-compose-remove-test-'));
   await provider.remove({ spec: {}, runtimeDirectory: directory }, true);
   assert.deepEqual(args, ['down', '--remove-orphans', '--volumes']);
 });
