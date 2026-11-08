@@ -1,4 +1,9 @@
-# Verification
+# Historical prototype verification
+
+This report records the earlier `dev-now` prototype before the `agent-env` rename and the conversion to CLI E2E tests.
+The unit-test totals below describe historical runs. They do not describe the current test suite.
+See [Agent Swarm evidence](examples/agent-swarm/VERIFICATION.md) for the first complete application check.
+See [release and CI instructions](docs/releases.md) for the current test commands.
 
 Verified on 2026-11-08 (BCN), on macOS with Node 26.0.0 and Docker.
 The installed `/opt/homebrew/bin/dev-now` links to this checkout. No build step or npm dependencies are required.

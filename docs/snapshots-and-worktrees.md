@@ -49,7 +49,7 @@ The helper accepts these options:
 | --- | --- | --- |
 | `image` | Both | Archive helper image. Default: `busybox:1.37`. |
 | `endpointUrl` | S3 operations | AWS CLI endpoint URL for compatible services. |
-| `awsCommand` | S3 operations | AWS executable path. Default: installed `aws`. Tests use a fake executable. |
+| `awsCommand` | S3 operations | AWS executable path. Default: installed `aws`. |
 | `omitUnsupportedMounts` | Export | Explicitly omit unsupported or shared mounts. Default: reject them. |
 | `volumeNames` | Restore | Map manifest volume IDs, such as `v0`, to fresh Docker volume names. |
 | `destinationHandle` | Restore | Identify existing destination service containers for a stopped-state check. |
@@ -80,7 +80,7 @@ const composed = await restoreSnapshot(destinationSpec, '/backups/checkpoint-1',
 
 ## Ownership and archive rules
 
-Managed volumes need a matching `dev-now.owner` label or the container's matching `com.docker.compose.project` label.
+Managed volumes need a matching `agent-env.owner` label or the container's matching `com.docker.compose.project` label.
 Only local Docker volumes without driver options qualify for automated export.
 Volumes attached to any container outside the handle are shared, even when that container is stopped.
 The helper rejects those volumes.
@@ -92,7 +92,7 @@ Other bind mounts, tmpfs mounts, external volumes, and shared volumes require se
 `omitUnsupportedMounts: true` records each omission with its service, target, type, and reason.
 The parent must display these omissions to the caller.
 
-`manifest.json` has format `dev-now-snapshot`, version `1`.
+`manifest.json` has format `agent-env-snapshot`, version `1`.
 Each volume record includes its ID, actual source name, service mounts, archive name, SHA-256, and archive byte count.
 One source volume produces one archive, even when several source services mount it.
 The manifest includes only source name, owner, and provider identifiers.
@@ -182,7 +182,7 @@ Credential detection uses conservative filename rules. It cannot detect credenti
 Committed build files remain part of the selected ref.
 Submodule working directories and changes within submodules are not copied.
 
-Ownership records reside in `<git-common-dir>/dev-now-worktrees/<token>.json`.
+Ownership records reside in `<git-common-dir>/agent-env-worktrees/<token>.json`.
 Persist the returned `ownership` object with the instance record.
 Removal checks that record and Git's current repository, path, and branch.
 It refuses dirty worktrees, including ignored files, unless the caller explicitly selects `dirty: 'discard'`.
@@ -201,18 +201,18 @@ That new worktree normally contains the copied source changes and therefore coun
 ```sh
 node --check src/snapshots.mjs
 node --check src/worktrees.mjs
-node --test test/snapshots.test.mjs test/worktrees.test.mjs
-npm test
 npm run check
+node test/run.mjs features
+AGENT_ENV_TEST_SSH=my-test-host node test/run.mjs ssh
+AGENT_ENV_TEST_S3=s3://test-bucket/prefix node test/run.mjs s3
 ```
 
-Docker tests require a running Docker host and an existing `busybox:1.37` image.
-They skip with a reason when those prerequisites are absent.
-They do not download an image.
+Set `AGENT_ENV_CLI` to the absolute path of an installed package executable.
+Docker tests require a running Docker host and can download public images.
 Tests use owned temporary containers, volumes, directories, and Git repositories.
-They check binary restoration, source isolation, Compose volume discovery, archive attacks, cleanup, conflicts, and credential exclusions.
-S3 tests use a precise fake AWS CLI contract, including conditional writes and manifest publication order.
-SSH tests use a local fake SSH executable with the real Docker command helper and binary file descriptors.
+They check restoration, source isolation, Compose volumes, archive checksums, cleanup, conflicts, and credential exclusions through the public CLI.
+S3 tests use a real S3 service. CI provides a disposable SeaweedFS fixture.
+SSH tests use a real server. CI provides a disposable local SSH fixture.
 
 Live integration passed against a temporary SeaweedFS S3 server. Verify each production storage service separately.
 Test export and restore against a temporary bucket or a local S3-compatible server.

@@ -8,7 +8,7 @@ import { readEnvironmentSecrets, setEnvironmentSecret, resolveEnvironment } from
 export async function addService(kind, options = {}) {
   if (!['postgres', 'redis'].includes(kind)) throw new Error('Available services: postgres, redis.');
   const cwd = options.cwd ?? process.cwd();
-  const filename = resolve(cwd, options.config ?? 'dev-now.json');
+  const filename = resolve(cwd, options.config ?? 'agent-env.json');
   let config, existing = true;
   try { config = JSON.parse(await readFile(filename, 'utf8')); }
   catch (error) {
@@ -31,13 +31,13 @@ export async function addService(kind, options = {}) {
     port, containerPort: postgres ? 5432 : 6379, protocol: 'tcp',
     health: postgres ? 'pg_isready -h 127.0.0.1 -U postgres' : 'redis-cli ping',
     volumes: { data: postgres ? '/var/lib/postgresql/data' : '/data' },
-    ...(postgres ? { env: { POSTGRES_DB: 'app', POSTGRES_PASSWORD: { secret: 'POSTGRES_PASSWORD' } } } : { command: 'redis-server --appendonly yes' }),
+    ...(postgres ? { env: { POSTGRES_DB: 'app', POSTGRES_PASSWORD: { secret: 'POSTGRES_PASSWORD' } } } : { command: 'redis-server --dir /data --appendonly yes' }),
   };
   if (config.provider === 'compose' || config.compose) {
     const current = await loadSpec({ cwd, config: existing ? options.config : undefined, env: existingEnvironment ? environment : undefined });
     if (current.compose.model.services[kind]) throw new Error(`Service ${kind} already exists in the Compose project.`);
     if (Object.values(current.services).some(service => service.port === port)) throw new Error(`Port ${port} already belongs to another service.`);
-    const addonName = environment === 'default' ? 'dev-now.addons.json' : `dev-now.addons.${environment}.json`;
+    const addonName = environment === 'default' ? 'agent-env.addons.json' : `agent-env.addons.${environment}.json`;
     const addon = resolve(cwd, addonName);
     let model;
     try { model = JSON.parse(await readFile(addon, 'utf8')); }
@@ -47,8 +47,8 @@ export async function addService(kind, options = {}) {
       image: service.image, ports: [`${port}:${service.containerPort}`],
       volumes: [`${kind}-data:${service.volumes.data}`],
       healthcheck: { test: ['CMD-SHELL', service.health], interval: '2s', timeout: '2s', retries: 30 },
-      ...(postgres ? { environment: { POSTGRES_DB: 'app', POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD with dev-now env set}' } }
-        : { command: ['redis-server', '--appendonly', 'yes'] }),
+      ...(postgres ? { environment: { POSTGRES_DB: 'app', POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD with agent-env env set}' } }
+        : { command: ['redis-server', '--dir', '/data', '--appendonly', 'yes'] }),
     };
     model.volumes[`${kind}-data`] = {};
     target.provider = 'compose';
@@ -67,5 +67,5 @@ export async function addService(kind, options = {}) {
     if (!Object.hasOwn(values, 'POSTGRES_PASSWORD')) await setEnvironmentSecret({ ...secretOptions, key: 'POSTGRES_PASSWORD', fromEnv: 'GENERATED', env: { GENERATED: randomBytes(24).toString('base64url') } });
   }
   await writeFile(filename, `${JSON.stringify(config, null, 2)}\n`);
-  return { message: `Added ${kind} on localhost:${port}. Run dev-now up${environment === 'default' ? '' : ` --env ${environment}`}.` };
+  return { message: `Added ${kind} on localhost:${port}. Run agent-env up${environment === 'default' ? '' : ` --env ${environment}`}.` };
 }

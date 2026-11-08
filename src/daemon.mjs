@@ -113,7 +113,7 @@ async function connect(handle) {
 }
 function instance(name) {
   const handle = Object.hasOwn(state.instances, name) ? state.instances[name] : undefined;
-  if (!handle) throw new Error(`Instance ${name} does not exist. Run dev-now list.`);
+  if (!handle) throw new Error(`Instance ${name} does not exist. Run agent-env list.`);
   return handle;
 }
 function summary(handle) {
@@ -154,7 +154,11 @@ function storageOptions(message) {
 }
 async function action(message) {
   const { name, type } = message;
-  if (type === 'resume') return action({ type: 'up', spec: structuredClone(instance(name).spec) });
+  if (type === 'resume') {
+    const spec = structuredClone(instance(name).spec);
+    if (message.startupTimeoutSeconds !== undefined) spec.startupTimeoutSeconds = message.startupTimeoutSeconds;
+    return action({ type: 'up', spec });
+  }
   if (type === 'expire') {
     const handle = instance(name);
     if (!handle.spec.cloud?.expiresAt || Date.parse(handle.spec.cloud.expiresAt) > Date.now()) throw new Error('This cloud machine has not expired.');
@@ -169,8 +173,17 @@ async function action(message) {
     if (type === 'restore' && handle) throw new Error('Restore requires a new instance name.');
     if (type === 'restore' && !provider.docker) throw new Error('This provider does not support volume snapshots.');
     let restored;
-    const identitySpec = value => {
+    const identitySpec = (value, omitEnvironment = false) => {
       const copy = structuredClone(value);
+      delete copy.startupTimeoutSeconds;
+      if (omitEnvironment) {
+        delete copy.env; delete copy.envFiles; delete copy.envFile; delete copy.sensitiveValues;
+        for (const service of Object.values(copy.services ?? {})) delete service.env;
+        if (copy.compose) {
+          delete copy.compose.environment;
+          for (const service of Object.values(copy.compose.model?.services ?? {})) delete service.environment;
+        }
+      }
       if (copy.cloud) {
         delete copy.host; delete copy.sshConfig;
         const { idleTimeoutMs, expiresAt, ...identity } = cloudOptions(copy.cloud);
@@ -178,8 +191,10 @@ async function action(message) {
       }
       return copy;
     };
-    if (handle && !handle.removed && !isDeepStrictEqual(identitySpec(handle.spec), identitySpec(spec))) {
-      throw new Error(`Configuration changed for ${spec.name}. Run dev-now rm ${spec.name}, then up. Volumes remain.`);
+    const changed = handle && !handle.removed && !isDeepStrictEqual(identitySpec(handle.spec), identitySpec(spec));
+    const canRecreate = provider.docker || (spec.provider === 'sandbox' && spec.sandbox?.adapter === 'docker');
+    if (changed && (!canRecreate || !isDeepStrictEqual(identitySpec(handle.spec, true), identitySpec(spec, true)))) {
+      throw new Error(`Configuration changed for ${spec.name}. Run agent-env rm ${spec.name}, then up. Volumes remain.`);
     }
     try {
       await reserve(spec);
@@ -193,10 +208,19 @@ async function action(message) {
           peer.spec.cloud = { ...spec.cloud };
         }
       }
+      if (changed) {
+        await disconnect(spec.name);
+        await provider.remove(handle, false);
+        handle.removed = true;
+        handle.running = false;
+        handle.spec = spec;
+        await save();
+      }
       if (handle && !handle.removed) {
         // Keep the public listeners while replacing only this instance's tunnels.
         for (const connection of connections.get(spec.name) ?? []) connection.close();
         connections.delete(spec.name);
+        handle.spec = spec;
         await provider.start(handle);
       } else {
         if (type === 'restore') restored = await restoreSnapshot(spec, message.location, provider, storageOptions(message));
@@ -236,7 +260,7 @@ async function action(message) {
   }
   if (type === 'use') {
     const handle = instance(name);
-    if (!summary(handle).connected) throw new Error('This instance has no active connection. Run dev-now up first.');
+    if (!summary(handle).connected) throw new Error('This instance has no active connection. Run agent-env up first.');
     for (const service of Object.values(handle.services)) {
       const route = routes.get(service.port);
       if (!route) continue;
@@ -251,7 +275,7 @@ async function action(message) {
     const result = await extras.enableHttps(message.port ?? 8443);
     state.httpsPort = result.port;
     await save();
-    return { ...result, message: `HTTPS enabled on port ${result.port}. Trust the CA with dev-now trust.` };
+    return { ...result, message: `HTTPS enabled on port ${result.port}. Trust the CA with agent-env trust.` };
   }
   if (type === 'ui') {
     const result = await extras.enableUi(message.port ?? 4780);
@@ -365,7 +389,7 @@ async function action(message) {
     const handle = instance(name);
     const provider = providerFor(handle.spec);
     activity(name);
-    if (handle.sleeping) throw new Error('The cloud machine is sleeping. Run dev-now up first.');
+    if (handle.sleeping) throw new Error('The cloud machine is sleeping. Run agent-env up first.');
     if (type === 'sync') { await provider.sync(handle); return { message: 'Files synchronized.' }; }
     const service = message.service ?? Object.keys(handle.services)[0];
     if (!handle.services[service]) throw new Error(`Service ${service} does not exist.`);

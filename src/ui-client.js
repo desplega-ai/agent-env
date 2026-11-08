@@ -45,7 +45,7 @@ async function refresh() {
 }
 $('refresh').onclick = refresh;
 $('close').onclick = () => $('logs').close();
-$('auto').checked = localStorage.getItem('dev-now-auto-refresh') === 'true';
-$('auto').onchange = () => localStorage.setItem('dev-now-auto-refresh', String($('auto').checked));
+$('auto').checked = localStorage.getItem('agent-env-auto-refresh') === 'true';
+$('auto').onchange = () => localStorage.setItem('agent-env-auto-refresh', String($('auto').checked));
 setInterval(() => { if ($('auto').checked && !document.hidden) refresh(); }, 5000);
 refresh();

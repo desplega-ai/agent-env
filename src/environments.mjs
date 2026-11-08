@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -12,6 +12,18 @@ export function stringList(value, label) {
   const values = Array.isArray(value) ? value : [value];
   if (values.some(item => typeof item !== 'string' || !item)) throw new Error(`${label} requires a string or an array of strings.`);
   return values;
+}
+
+export async function discoverEnvironmentFiles(cwd, environment = 'default') {
+  const candidates = ['.env', '.env.local'];
+  if (environment !== 'default') candidates.push(`.env.${environment}`, `.env.${environment}.local`);
+  const files = [];
+  for (const candidate of candidates) {
+    const filename = resolve(cwd, candidate);
+    try { if ((await stat(filename)).isFile()) files.push(filename); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return files;
 }
 
 // Values are literal. This parser never executes commands or expands variables.
@@ -48,7 +60,7 @@ export function parseEnvFile(source) {
 export function resolveEnvironment(config, name = 'default') {
   if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,47}$/.test(name)) throw new Error('Use a valid environment name.');
   const environments = config.environments ?? {};
-  if (name !== 'default' && !Object.hasOwn(environments, name)) throw new Error(`Environment ${name} is not defined in dev-now.json.`);
+  if (name !== 'default' && !Object.hasOwn(environments, name)) throw new Error(`Environment ${name} is not defined in agent-env.json.`);
   const { environments: ignored, ...base } = config;
   const overlay = Object.hasOwn(environments, name) ? environments[name] : {};
   if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)) throw new Error('Environment definitions must be objects.');
@@ -67,7 +79,7 @@ async function storePath({ cwd = process.cwd(), environment = 'default', home } 
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(environment)) throw new Error('Use a valid environment name.');
   const project = await realpath(cwd);
   const digest = createHash('sha256').update(project).digest('hex');
-  const root = resolve(home ?? process.env.DEV_NOW_HOME ?? join(homedir(), '.local/state/dev-now'));
+  const root = resolve(home ?? process.env.AGENT_ENV_HOME ?? join(homedir(), '.local/state/agent-env'));
   return join(root, 'secrets', digest, `${environment}.json`);
 }
 export async function readEnvironmentSecrets(options = {}) {
@@ -146,7 +158,7 @@ export async function loadEnvironment({ cwd, environment = 'default', files = []
   const result = Object.create(null);
   for (const filename of stringList(files, 'env-file')) {
     const fileValues = parseEnvFile(await readFile(resolve(cwd, filename), 'utf8'));
-    sensitiveValues.push(...Object.values(fileValues));
+    sensitiveValues.push(...credentialValues(fileValues));
     Object.assign(result, fileValues);
   }
   const secrets = await readEnvironmentSecrets({ cwd, environment, home });
@@ -170,7 +182,11 @@ export async function loadEnvironment({ cwd, environment = 'default', files = []
 }
 
 export function credentialValues(values = {}) {
-  return Object.entries(values).filter(([key]) => /(?:^|_)(?:PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?|API_KEY|PRIVATE_KEY|ACCESS_KEY)(?:_|$)/i.test(key)).map(([, value]) => value);
+  return Object.entries(values).filter(([key, value]) =>
+    /PASSWORD|PASSWD|(?:^|_)(?:SECRET|TOKEN|PAT|CREDENTIALS?|KEY|SALT|APIKEY|AUTHORIZATION|COOKIE)(?:_|$)/i.test(key)
+    || typeof value === 'string' && (/^[a-z][a-z0-9+.-]*:\/\/[^/\s]*:[^/\s]+@/i.test(value)
+      || /^(?:gh[pousr]_|github_pat_|npm_|sk[-_]|xox[baprs]-|AKIA[A-Z0-9]{16}|glpat-|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/.test(value)))
+    .map(([, value]) => value);
 }
 
 export function sensitiveValuesForSpec(spec = {}) {

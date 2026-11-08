@@ -1,126 +1,236 @@
 import assert from 'node:assert/strict';
-import { cp, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { run } from '../src/system.mjs';
+import { randomUUID } from 'node:crypto';
+import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { docker, fixture, freePort, sshOptions, requestHttp } from './helpers.mjs';
 
-const directory = await mkdtemp(join(tmpdir(), 'dev-now-compose-e2e-'));
-process.env.DEV_NOW_HOME = join(directory, 'private-state');
-const { loadSpec } = await import('../src/config.mjs');
-const { ComposeProvider } = await import('../src/providers/compose.mjs');
-const { setEnvironmentSecret } = await import('../src/environments.mjs');
-const provider = new ComposeProvider();
-const handles = [];
+const test = await fixture('compose', { AGENT_ENV_E2E_PASSWORD: 'compose-private-$-literal' });
+const { cwd, home, cli, invoke } = test;
+const token = randomUUID();
+const port = await freePort(), adminPort = await freePort();
+const externalVolume = `agent-env-test-${token}-data`, externalNetwork = `agent-env-test-${token}-net`;
 const images = new Set();
-const failedVolumes = new Set();
-const owner = 'compose-e2e-' + process.pid;
-const cwd = join(directory, 'checkout');
-let externalVolume, externalNetwork;
+let owner, retainedVolume, madeExternalVolume = false, madeExternalNetwork = false;
+const options = [...sshOptions(), '--no-watch'];
+const exec = async (name, service, command) => (await cli(['exec', name, '--service', service, '--', ...command])).output;
+const sql = (name, query) => exec(name, 'db', ['psql', '-U', 'postgres', '-d', 'app', '-Atc', query]);
+async function containers() {
+  const ids = (await docker(['ps', '-aq', '--filter', `label=agent-env.e2e=${token}`])).split(/\s+/).filter(Boolean);
+  return ids.length ? JSON.parse(await docker(['inspect', ...ids])) : [];
+}
+async function collectImages() {
+  for (const info of await containers()) if (info.Config.Image.endsWith(':agent-env')) images.add(info.Config.Image);
+}
+async function up(name, file, config = 'agent-env.json', extra = []) {
+  return cli(['up', '--name', name, '--compose-file', file, '--config', config, ...extra, ...options]);
+}
 try {
-  await run('docker', ['info', '--format', '{{.ServerVersion}}']);
-  await cp(resolve(import.meta.dirname, '../examples/compose'), cwd, { recursive: true });
-  const original = await readFile(join(cwd, 'compose.yaml'), 'utf8');
-  await setEnvironmentSecret({ cwd, key: 'POSTGRES_PASSWORD', fromEnv: 'INPUT', env: { INPUT: 'test-password-with-$-literal' } });
-  const spec = async (name, options = {}) => ({ ...await loadSpec({ cwd, name, ...options }), owner });
-  const create = async (name, options) => {
-    const configuration = await spec(name, options);
-    images.add(`${provider.prefix(configuration)}-web:dev-now`);
-    const handle = await provider.create(configuration);
-    handles.push(handle);
-    return handle;
-  };
-  const first = await create('alpha');
-  const second = await create('beta', { profile: 'tools' });
-  assert.equal(first.services.db.internal, true);
-  assert.equal(first.services.db.hostPort, undefined);
+  await docker(['info', '--format', '{{.ServerVersion}}']);
+  await docker(['compose', 'version']);
+  const source = `services:
+  web:
+    build: .
+    labels: {agent-env.e2e: "${token}"}
+    ports: ["${port}:3000"]
+    volumes: [".:/workspace"]
+    secrets: [test_token]
+    configs: [test_settings]
+    command: [httpd, -f, -p, "3000", -h, /workspace]
+    depends_on:
+      db: {condition: service_healthy}
+  db:
+    image: postgres:16-alpine
+    labels: {agent-env.e2e: "${token}"}
+    environment:
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: app
+    volumes: ["data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U postgres"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+  tools:
+    image: busybox:1.37
+    labels: {agent-env.e2e: "${token}"}
+    profiles: [tools]
+    command: [sleep, "3600"]
+volumes:
+  data: {}
+secrets:
+  test_token:
+    file: .env.compose secret
+configs:
+  test_settings:
+    file: .env.compose config
+`;
+  await writeFile(join(cwd, 'compose.yaml'), source);
+  await writeFile(join(cwd, 'Dockerfile'), 'FROM busybox:1.37\n');
+  await writeFile(join(cwd, 'index.html'), 'Compose public CLI');
+  await writeFile(join(cwd, '.env.compose secret'), 'compose-file-private-value');
+  await writeFile(join(cwd, '.env.compose config'), 'compose-file-settings');
+  await writeFile(join(cwd, 'agent-env.json'), JSON.stringify({ provider: 'compose', env: { POSTGRES_PASSWORD: { secret: 'POSTGRES_PASSWORD' } } }));
+  await cli(['env', 'set', 'POSTGRES_PASSWORD', '--from-env', 'AGENT_ENV_E2E_PASSWORD']);
+  const first = await up('alpha', 'compose.yaml');
+  const second = await up('beta', 'compose.yaml', 'agent-env.json', ['--profile', 'tools']);
+  assert.equal(first.services.db.url, null);
   assert.equal(first.services.tools, undefined);
-  assert.equal(second.services.tools.internal, true);
-  assert.notEqual(first.services.web.hostPort, second.services.web.hostPort);
-  assert.equal(first.services.web.port, 3000);
-  assert.equal((await stat(first.runtimeFile)).mode & 0o777, 0o600);
-  assert.equal((await stat(first.runtimeDirectory)).mode & 0o777, 0o700);
-  const connections = await provider.connect(first);
-  try {
-    assert.deepEqual(connections.map(connection => connection.name), ['web']);
-    assert.match(await (await fetch(`http://127.0.0.1:${connections[0].backendPort}`)).text(), /Postgres is internal/);
-  } finally { connections.forEach(connection => connection.close()); }
-  const sql = (handle, query) => provider.exec(handle, 'db', ['psql', '-U', 'postgres', '-d', 'app', '-Atc', query]);
-  await sql(first, "CREATE TABLE evidence(value text); INSERT INTO evidence VALUES ('alpha');");
-  assert.equal(await sql(first, 'SELECT value FROM evidence'), 'alpha');
-  assert.equal(await sql(second, "SELECT count(*) FROM pg_tables WHERE tablename='evidence'"), '0');
-  const info = JSON.parse(await provider.docker(first.spec, ['inspect', first.services.db.container]))[0];
-  assert.ok(info.Config.Env.includes('POSTGRES_PASSWORD=test-password-with-$-literal'));
-  const mounts = info.Mounts.filter(mount => mount.Type === 'volume');
-  assert.ok(mounts.every(mount => mount.Name.startsWith(provider.prefix(first.spec))));
-  assert.equal(await provider.exec(first, 'db', ['printenv', 'POSTGRES_PASSWORD']), '[redacted]');
-  await provider.stop(first);
-  await provider.start(first);
-  assert.equal(await sql(first, 'SELECT value FROM evidence'), 'alpha');
-  await provider.remove(first);
-  handles.splice(handles.indexOf(first), 1);
-  const restored = await create('alpha');
-  assert.equal(await sql(restored, 'SELECT value FROM evidence'), 'alpha');
-  assert.equal(await readFile(join(cwd, 'compose.yaml'), 'utf8'), original);
-
-  // Multiple aliases share one container. A completed dependency has no route.
-  await writeFile(join(cwd, 'multi.yaml'), 'services:\n  web:\n    image: busybox:1.37\n    command: ["sh", "-c", "httpd -f -p 8080 & httpd -f -p 8081 & wait"]\n    ports: ["8080:8080", "8081:8081"]\n    depends_on:\n      migrate:\n        condition: service_completed_successfully\n  migrate:\n    image: busybox:1.37\n    command: ["true"]\n');
-  await writeFile(join(cwd, 'multi.json'), JSON.stringify({ compose: { routes: {
-    web: { service: 'web', target: 8080, port: 8080, protocol: 'http' },
-    admin: { service: 'web', target: 8081, port: 8081, protocol: 'http' },
-  } } }));
-  const multi = await provider.create(await spec('multi', { 'compose-file': 'multi.yaml', config: 'multi.json' }));
-  handles.push(multi);
-  const aliases = await provider.connect(multi);
-  try {
-    assert.deepEqual(aliases.map(connection => connection.name), ['web', 'admin']);
-    for (const connection of aliases) assert.equal((await fetch(`http://127.0.0.1:${connection.backendPort}`)).status, 404);
-  } finally { aliases.forEach(connection => connection.close()); }
-  assert.equal(multi.services.web.container, multi.services.admin.container);
-  assert.equal((await provider.status(multi)).migrate, 'exited');
-
-  // A failed start deletes only volumes that this attempt created.
-  await writeFile(join(cwd, 'failure.yaml'), 'services:\n  worker:\n    image: busybox:1.37\n    command: ["sh", "-c", "echo $POSTGRES_PASSWORD; exit 9"]\n    volumes: ["data:/data"]\nvolumes:\n  data: {}\n');
-  const failure = await spec('failure', { 'compose-file': 'failure.yaml' });
-  const failedVolume = `${provider.prefix(failure)}-data`;
-  failedVolumes.add(failedVolume);
-  const fail = async () => {
-    try { await provider.create(failure); assert.fail('The deliberately failed service started.'); }
-    catch (error) { assert.ok(!error.message.includes('test-password-with-$-literal')); assert.match(error.message, /Compose up failed/); }
-  };
-  await fail();
-  assert.equal(await run('docker', ['volume', 'ls', '-q', '--filter', `name=^${failedVolume}$`]), '');
-  await run('docker', ['volume', 'create', failedVolume]);
-  await fail();
-  await run('docker', ['volume', 'inspect', failedVolume]);
-
-  // A purge must not remove resources declared external.
-  externalVolume = `dev-now-compose-e2e-${process.pid}-external-data`;
-  externalNetwork = `dev-now-compose-e2e-${process.pid}-external-net`;
-  await run('docker', ['volume', 'create', externalVolume]);
-  await run('docker', ['network', 'create', externalNetwork]);
-  await writeFile(join(cwd, 'external.yaml'), `services:\n  worker:\n    image: busybox:1.37\n    command: ["sleep", "3600"]\n    volumes: ["data:/data"]\nvolumes:\n  data:\n    external: true\n    name: ${externalVolume}\nnetworks:\n  default:\n    external: true\n    name: ${externalNetwork}\n`);
-  const external = await provider.create(await spec('external', { 'compose-file': 'external.yaml' }));
-  handles.push(external);
-  await provider.remove(external, true);
-  handles.splice(handles.indexOf(external), 1);
-  await run('docker', ['volume', 'inspect', externalVolume]);
-  await run('docker', ['network', 'inspect', externalNetwork]);
-  await provider.remove(restored);
-  restored.removed = true;
-  await provider.remove(restored, true);
-  handles.splice(handles.indexOf(restored), 1);
-  for (const volume of restored.ownedVolumes) assert.equal(await run('docker', ['volume', 'ls', '-q', '--filter', `name=^${volume}$`]), '');
-  console.log('PASS: Compose builds, profiles, dependencies, jobs, health, port aliases, loopback ports, private secrets, Postgres isolation, persistence, failure cleanup, source preservation, and external resource protection.');
-} finally {
-  const errors = [];
-  for (const handle of handles.reverse()) {
-    try { await provider.remove(handle, true); } catch (error) { errors.push(error); }
+  assert.equal(second.services.tools.url, null);
+  assert.equal((await requestHttp(`http://127.0.0.1:${port}`, { headers: { host: `alpha.localhost:${port}` } })).status, 200);
+  assert.equal((await requestHttp(`http://127.0.0.1:${port}`, { headers: { host: `beta.localhost:${port}` } })).body, 'Compose public CLI');
+  assert.equal(await exec('alpha', 'web', ['cat', '/run/secrets/test_token']), '[redacted]');
+  assert.equal(await exec('alpha', 'web', ['cat', '/test_settings']), 'compose-file-settings');
+  if (process.env.AGENT_ENV_TEST_SSH) {
+    await exec('alpha', 'web', ['sh', '-c', 'test ! -e "/workspace/.env.compose secret" && test ! -e "/workspace/.env.compose config"']);
   }
-  for (const image of images) await run('docker', ['image', 'rm', image]).catch(() => {});
-  for (const volume of failedVolumes) await run('docker', ['volume', 'rm', volume]).catch(() => {});
-  if (externalVolume) await run('docker', ['volume', 'rm', externalVolume]).catch(() => {});
-  if (externalNetwork) await run('docker', ['network', 'rm', externalNetwork]).catch(() => {});
-  await provider.dispose();
-  await rm(directory, { recursive: true, force: true });
-  if (errors.length) throw new AggregateError(errors, 'Compose E2E cleanup failed.');
+  const infos = await containers();
+  const network = Object.keys(infos.find(info => Object.keys(info.NetworkSettings.Networks).length).NetworkSettings.Networks)[0];
+  owner = JSON.parse(await docker(['network', 'inspect', network]))[0].Labels['agent-env.owner'];
+  assert.ok(owner);
+  const web = infos.filter(info => info.Config.Labels['com.docker.compose.service'] === 'web');
+  assert.equal(web.length, 2);
+  const bindings = web.map(info => info.NetworkSettings.Ports['3000/tcp'][0]);
+  assert.ok(bindings.every(binding => binding.HostIp === '127.0.0.1'));
+  assert.notEqual(bindings[0].HostPort, bindings[1].HostPort);
+  await collectImages();
+  for (const entry of await readdir(home)) {
+    if (!entry.startsWith('compose-')) continue;
+    const directory = join(home, entry);
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    for (const file of await readdir(directory)) assert.equal((await stat(join(directory, file))).mode & 0o777, 0o600);
+  }
+  await sql('alpha', "CREATE TABLE evidence(value text); INSERT INTO evidence VALUES ('alpha');");
+  assert.equal(await sql('alpha', 'SELECT value FROM evidence'), 'alpha');
+  assert.equal(await sql('beta', "SELECT count(*) FROM pg_tables WHERE tablename='evidence'"), '0');
+  assert.equal(await exec('alpha', 'db', ['printenv', 'POSTGRES_PASSWORD']), '[redacted]');
+  await cli(['down', 'alpha']);
+  await cli(['up', 'alpha']);
+  assert.equal(await sql('alpha', 'SELECT value FROM evidence'), 'alpha');
+  await cli(['rm', 'alpha']);
+  await up('alpha', 'compose.yaml');
+  assert.equal(await sql('alpha', 'SELECT value FROM evidence'), 'alpha');
+  assert.equal(await readFile(join(cwd, 'compose.yaml'), 'utf8'), source);
+
+  await writeFile(join(cwd, 'multi.yaml'), `services:
+  web:
+    image: busybox:1.37
+    labels: {agent-env.e2e: "${token}"}
+    command: [sh, -c, "httpd -f -p 8080 & httpd -f -p 8081 & wait"]
+    ports: ["8080:8080", "8081:8081"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+  migrate:
+    image: busybox:1.37
+    labels: {agent-env.e2e: "${token}"}
+    command: ["true"]
+`);
+  await writeFile(join(cwd, 'multi.json'), JSON.stringify({ provider: 'compose', compose: { routes: {
+    web: { service: 'web', target: 8080, port, protocol: 'http' },
+    admin: { service: 'web', target: 8081, port: adminPort, protocol: 'http' },
+  } } }));
+  await up('multi', 'multi.yaml', 'multi.json');
+  for (const routePort of [port, adminPort]) assert.equal((await requestHttp(`http://127.0.0.1:${routePort}`, { headers: { host: `multi.localhost:${routePort}` } })).status, 404);
+  const listed = (await cli(['list'])).find(instance => instance.name === 'multi');
+  assert.equal(listed.status.migrate, 'exited');
+  assert.equal(listed.services.migrate.url, null);
+
+  // A new failed stack must release every container, network, and volume it creates.
+  await writeFile(join(cwd, 'failure.yaml'), `services:
+  worker:
+    image: busybox:1.37
+    labels: {agent-env.e2e: "${token}"}
+    command: [sh, -c, "printenv POSTGRES_PASSWORD; echo deliberate-compose-failure; exit 9"]
+    environment:
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD}
+    volumes: ["data:/data"]
+volumes:
+  data:
+    labels: {agent-env.e2e.failure: "${token}"}
+`);
+  const failure = await invoke(['up', '--name', 'failure', '--compose-file', 'failure.yaml', ...options], false);
+  assert.notEqual(failure.code, 0);
+  assert.ok(!(failure.stdout + failure.stderr).includes('compose-private-$-literal'));
+  assert.equal(await docker(['volume', 'ls', '-q', '--filter', `label=agent-env.e2e.failure=${token}`]), '');
+  assert.ok((await containers()).every(info => !info.Config.Labels['com.docker.compose.project'].endsWith('-failure')));
+  assert.equal(await docker(['network', 'ls', '-q', '--filter', `label=agent-env.owner=${owner}`, '--filter', 'name=-failure']), '');
+
+  // A later failed start must retain data from the earlier successful stack.
+  await writeFile(join(cwd, 'retained.yaml'), `services:
+  worker:
+    image: busybox:1.37
+    labels: {agent-env.e2e: "${token}"}
+    command: [sleep, "3600"]
+    volumes: ["data:/data"]
+volumes:
+  data: {}
+`);
+  await up('retained', 'retained.yaml');
+  await exec('retained', 'worker', ['sh', '-c', 'printf preserve-me > /data/value']);
+  const retained = (await containers()).find(info => info.Config.Labels['com.docker.compose.project'].endsWith('-retained'));
+  retainedVolume = retained.Mounts.find(mount => mount.Destination === '/data').Name;
+  await cli(['rm', 'retained']);
+  const retainedFailure = await invoke(['up', '--name', 'retained', '--compose-file', 'failure.yaml', ...options], false);
+  assert.notEqual(retainedFailure.code, 0);
+  await docker(['volume', 'inspect', retainedVolume]);
+  await up('retained', 'retained.yaml');
+  assert.equal(await exec('retained', 'worker', ['cat', '/data/value']), 'preserve-me');
+
+  await docker(['volume', 'create', externalVolume]);
+  madeExternalVolume = true;
+  await docker(['network', 'create', externalNetwork]);
+  madeExternalNetwork = true;
+  await writeFile(join(cwd, 'external.yaml'), `services:
+  worker:
+    image: busybox:1.37
+    labels: {agent-env.e2e: "${token}"}
+    command: [sleep, "3600"]
+    volumes: ["data:/data"]
+volumes:
+  data:
+    external: true
+    name: ${externalVolume}
+networks:
+  default:
+    external: true
+    name: ${externalNetwork}
+`);
+  await up('external', 'external.yaml');
+  await exec('external', 'worker', ['sh', '-c', 'printf external-survives > /data/value']);
+  await cli(['rm', 'external', '--purge']);
+  await docker(['volume', 'inspect', externalVolume]);
+  await docker(['network', 'inspect', externalNetwork]);
+  assert.equal(await docker(['run', '--rm', '--mount', `type=volume,src=${externalVolume},dst=/data`, 'busybox:1.37', 'cat', '/data/value']), 'external-survives');
+  await writeFile(join(cwd, 'Dockerfile.slow'), `FROM busybox:1.37\nRUN echo ${token} >/build-marker && sleep 12\n`);
+  await writeFile(join(cwd, 'slow.yaml'), `services:
+  web:
+    build: {context: ., dockerfile: Dockerfile.slow}
+    labels: {agent-env.e2e: "${token}"}
+    command: [sh, -c, "sleep 3; exec httpd -f -p 3000"]
+    ports: ["${port}:3000"]
+`);
+  await up('slow', 'slow.yaml', 'agent-env.json', ['--timeout', '8']);
+  await collectImages();
+  await cli(['rm', 'slow', '--purge']);
+  assert.equal(await docker(['image', 'ls', '-q', '--filter', `reference=agent-env-${owner}-slow-web:agent-env`]), '', 'Purge must remove the owned built image.');
+  console.log('PASS: Compose CLI builds, profiles, jobs, health, route aliases, isolated ports/data, secrets, persistence, failure cleanup, and external resource protection.');
+} finally {
+  try { await collectImages(); } finally { await test.cleanup(); }
+  const leakedImages = [];
+  for (const image of images) {
+    if (await docker(['image', 'ls', '-q', '--filter', `reference=${image}`])) {
+      leakedImages.push(image);
+      await docker(['image', 'rm', image]);
+    }
+  }
+  if (madeExternalVolume) await docker(['volume', 'rm', externalVolume]);
+  if (madeExternalNetwork) await docker(['network', 'rm', externalNetwork]);
+  if (owner) {
+    for (const resource of ['volume', 'network']) {
+      const retained = (await docker([resource, 'ls', '-q', '--filter', `label=agent-env.owner=${owner}`])).split(/\s+/).filter(Boolean);
+      for (const name of retained) await docker([resource, 'rm', name]);
+      assert.equal(await docker([resource, 'ls', '-q', '--filter', `label=agent-env.owner=${owner}`]), '', `${resource} cleanup left owned resources.`);
+    }
+  }
+  assert.equal((await containers()).length, 0);
+  assert.deepEqual(leakedImages, [], 'Purge must remove owned Compose images.');
 }

@@ -2,9 +2,9 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from '
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DockerProvider } from './docker.mjs';
 import { hash, validate } from '../config.mjs';
-import { parseEnvFile, redactEnvironment, sensitiveValuesForSpec } from '../environments.mjs';
+import { credentialValues, redactEnvironment, sensitiveValuesForSpec } from '../environments.mjs';
 import { home } from '../paths.mjs';
-import { quote, run } from '../system.mjs';
+import { run } from '../system.mjs';
 import { shouldSync } from '../source-paths.mjs';
 
 export async function detectComposeFiles(cwd) {
@@ -24,10 +24,10 @@ export async function detectComposeFiles(cwd) {
 }
 
 function sourceArgs(spec) {
-  return ['compose', '--project-directory', spec.cwd, '--project-name', 'dev-now-parse',
+  return ['compose', '--project-directory', spec.cwd, '--project-name', 'agent-env-parse',
     ...spec.compose.files.flatMap(file => ['-f', file]),
     ...(spec.compose.profiles ?? []).flatMap(profile => ['--profile', profile]),
-    ...(spec.envFiles ?? []).flatMap(file => ['--env-file', file])];
+    ...(spec.envFiles?.length ? spec.envFiles : ['/dev/null']).flatMap(file => ['--env-file', file])];
 }
 function composeEnvironment(spec) {
   // The caller selects files and profiles. Ambient Compose options must not change that selection.
@@ -76,7 +76,7 @@ function checkUnsupported(model) {
     if (service.networks && Object.values(service.networks).some(network => network?.ipv4_address || network?.ipv6_address || network?.mac_address)) throw new Error('Static network addresses cannot be isolated automatically.');
     if (service.mac_address) throw new Error('Static MAC addresses cannot be isolated automatically.');
     if (service.volumes_from?.length || service.external_links?.length) throw new Error('External container links and volumes_from are not supported. Use Compose dependencies and volumes.');
-    if (service.develop) throw new Error('Compose develop configuration requires a watch provider. Use dev-now sync.');
+    if (service.develop) throw new Error('Compose develop configuration requires a watch provider. Use agent-env sync.');
     if (service.ports?.some(port => port.mode && port.mode !== 'ingress')) throw new Error('Compose host port mode is not supported. Use the default port mode.');
   }
   for (const [kind, resources] of Object.entries({ networks: model.networks, volumes: model.volumes })) {
@@ -132,10 +132,15 @@ export async function resolveComposeSpec(spec) {
   const environment = await interpolationEnvironment(spec);
   const keys = new Set([...Object.keys(spec.env ?? {}), ...await interpolationKeys(spec)]);
   const sensitiveValues = [...(spec.sensitiveValues ?? [])];
-  for (const file of spec.envFiles?.length ? spec.envFiles : [join(spec.cwd, '.env')]) {
+  for (const file of spec.envFiles ?? []) {
     try {
-      const values = parseEnvFile(await readFile(file, 'utf8'));
-      for (const key of Object.keys(values)) { keys.add(key); sensitiveValues.push(values[key], environment[key]); }
+      const source = await readFile(file, 'utf8');
+      const values = {};
+      for (const line of source.split('\n')) {
+        const key = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:|$)/.exec(line)?.[1];
+        if (key) { keys.add(key); values[key] = environment[key]; }
+      }
+      sensitiveValues.push(...credentialValues(values));
     }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
@@ -143,7 +148,7 @@ export async function resolveComposeSpec(spec) {
     for (const resource of Object.values(model[kind] ?? {})) if (resource.environment) keys.add(resource.environment);
   }
   const captured = Object.fromEntries([...keys].filter(key => Object.hasOwn(environment, key)).map(key => [key, environment[key]]));
-  for (const key of keys) if (!Object.hasOwn(spec.env ?? {}, key) && Object.hasOwn(process.env, key)) sensitiveValues.push(captured[key]);
+  sensitiveValues.push(...credentialValues(captured));
   const unresolved = await parseCompose(spec, ['--no-env-resolution']);
   for (const [name, service] of Object.entries(unresolved.services ?? {})) {
     for (const file of service.env_file ?? []) {
@@ -153,7 +158,7 @@ export async function resolveComposeSpec(spec) {
           const key = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|$)/.exec(line)?.[1];
           if (!key || Object.hasOwn(service.environment ?? {}, key)) continue;
           const value = model.services[name]?.environment?.[key];
-          if (typeof value === 'string') sensitiveValues.push(value.replaceAll('$$', '$'));
+          if (typeof value === 'string') sensitiveValues.push(...credentialValues({ [key]: value.replaceAll('$$', '$') }));
         }
       }
       catch (error) { if (error.code !== 'ENOENT' || file.required !== false) throw new Error('Cannot read a Compose environment file. Check its path and permissions.'); }
@@ -252,7 +257,7 @@ export class ComposeProvider extends DockerProvider {
     }
     const builtImages = new Map();
     for (const [name, service] of Object.entries(model.services)) {
-      if (service.build && service.image) builtImages.set(service.image, `${project}-image-${hash(service.image)}:dev-now`);
+      if (service.build && service.image) builtImages.set(service.image, `${project}-image-${hash(service.image)}:agent-env`);
     }
     for (const [name, service] of Object.entries(model.services)) {
       const originalName = service.container_name;
@@ -265,9 +270,10 @@ export class ComposeProvider extends DockerProvider {
         service.image = builtImages.get(service.image);
         service.pull_policy = service.build ? 'build' : 'never';
       } else if (service.build) {
-        service.image = `${project}-${name}:dev-now`;
+        service.image = `${project}-${name}:agent-env`;
         service.pull_policy = 'build';
       }
+      if (service.build) service.build.labels = { ...service.build.labels, 'agent-env.owner': spec.owner, 'agent-env.instance': spec.name };
       service.ports = (service.ports ?? []).map(port => ({ target: port.target, protocol: 'tcp', host_ip: '127.0.0.1', published: '0' }));
       if (spec.host) {
         for (const volume of service.volumes ?? []) {
@@ -295,7 +301,7 @@ export class ComposeProvider extends DockerProvider {
       for (const [name, resource] of Object.entries(model[kind] ?? {})) {
         if (!resource.external) {
           resource.name = `${project}-${name}`;
-          resource.labels = { ...resource.labels, 'dev-now.owner': spec.owner };
+          resource.labels = { ...resource.labels, 'agent-env.owner': spec.owner };
         }
       }
     }
@@ -314,15 +320,17 @@ export class ComposeProvider extends DockerProvider {
         if (!resource.file || !spec.host) continue;
         const local = resource.file.startsWith(`${directory}${sep}`) ? resource.file : (await checkoutPath(spec, resource.file, workspace, true)).actual;
         const filename = `${kind}-${hash(name)}`;
-        assets.push({ local, remote: join(workspace, '.dev-now', filename) });
-        resource.file = join(workspace, '.dev-now', filename);
+        assets.push({ local, remote: join(workspace, '.agent-env', filename) });
+        resource.file = join(workspace, '.agent-env', filename);
       }
     }
     const localFile = join(directory, 'compose.json');
     await writeFile(join(directory, 'redactions.json'), JSON.stringify(redactions), { mode: 0o600 });
     // Compose config already escapes interpolation for another Compose invocation.
     await writeFile(localFile, `${JSON.stringify(model, null, 2)}\n`, { mode: 0o600 });
-    return { project, services, localFile, assets, ownedVolumes: Object.values(model.volumes ?? {}).filter(volume => !volume.external).map(volume => volume.name) };
+    return { project, services, localFile, assets,
+      ownedImages: [...new Set(Object.values(model.services).filter(service => service.build).map(service => service.image))],
+      ownedVolumes: Object.values(model.volumes ?? {}).filter(volume => !volume.external).map(volume => volume.name) };
   }
   async create(spec) {
     validate(spec);
@@ -331,45 +339,46 @@ export class ComposeProvider extends DockerProvider {
     const existing = await this.docker(spec, ['ps', '-aq', '--filter', `label=com.docker.compose.project=${this.prefix(spec)}`]);
     if (existing) throw new Error('This Compose project already has containers. Reconnect its existing handle or choose another instance name.');
     const previousVolumes = new Set((await this.docker(spec, ['volume', 'ls', '-q'])).split(/\s+/));
+    const previousImages = new Set((await this.docker(spec, ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'])).split(/\s+/));
     await mkdir(home, { recursive: true, mode: 0o700 });
     const directory = await mkdtemp(join(home, 'compose-'));
     await chmod(directory, 0o700);
     let handle;
     let attempted = false;
     try {
-      const workspace = spec.host ? `${await this.command(spec, ['pwd'])}/.local/share/dev-now/${spec.owner}/${spec.name}` : spec.cwd;
+      const workspace = spec.host ? `${await this.command(spec, ['pwd'])}/.local/share/agent-env/${spec.owner}/${spec.name}` : spec.cwd;
       const prepared = await this.prepare(spec, workspace, directory);
-      handle = { spec, workspace, project: prepared.project, services: prepared.services, ownedVolumes: prepared.ownedVolumes, runtimeDirectory: directory,
-        runtimeFile: spec.host ? join(workspace, '.dev-now', 'compose.json') : prepared.localFile };
+      handle = { spec, workspace, project: prepared.project, services: prepared.services, ownedVolumes: prepared.ownedVolumes, ownedImages: prepared.ownedImages, runtimeDirectory: directory,
+        runtimeFile: spec.host ? join(workspace, '.agent-env', 'compose.json') : prepared.localFile };
       if (spec.host) {
         await this.command(spec, ['mkdir', '-p', workspace]);
         await this.command(spec, ['chmod', '700', workspace]);
       }
       await this.sync(handle);
       if (spec.host) {
-        const remoteDirectory = join(workspace, '.dev-now');
+        const remoteDirectory = join(workspace, '.agent-env');
         await this.command(spec, ['mkdir', '-p', remoteDirectory]);
         await this.command(spec, ['chmod', '700', remoteDirectory]);
         for (const asset of [...prepared.assets, { local: prepared.localFile, remote: handle.runtimeFile }]) {
-          await run('rsync', ['-az', '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), asset.local, `${spec.host}:${quote(asset.remote)}`]);
+          await this.transfer(spec, asset.local, asset.remote);
           await this.command(spec, ['chmod', '600', asset.remote]);
         }
       }
       attempted = true;
-      await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', '60']);
-      await this.wait(handle);
+      await this.launch(handle);
       return handle;
     } catch (error) {
       if (attempted) await this.compose(handle, ['down', '--remove-orphans']).catch(() => {});
       if (attempted) {
         for (const volume of handle.ownedVolumes.filter(volume => !previousVolumes.has(volume))) await this.docker(spec, ['volume', 'rm', volume]).catch(() => {});
+        await this.removeImages(handle, handle.ownedImages.filter(image => !previousImages.has(image))).catch(cleanup => { error.message += ` Image cleanup failed: ${cleanup.message}`; });
       }
-      if (handle?.spec.host && handle.workspace.endsWith(`/.local/share/dev-now/${spec.owner}/${spec.name}`)) await this.command(spec, ['rm', '-rf', '--', handle.workspace]).catch(() => {});
+      if (handle?.spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${spec.owner}/${spec.name}`)) await this.command(spec, ['rm', '-rf', '--', handle.workspace]).catch(() => {});
       await rm(directory, { recursive: true, force: true });
       throw error;
     }
   }
-  async wait(handle) {
+  async wait(handle, deadline) {
     const containers = new Map();
     for (const service of Object.values(handle.services)) {
       if (!containers.has(service.composeService)) {
@@ -388,7 +397,7 @@ export class ComposeProvider extends DockerProvider {
       service.hostPort = Number(ports[0].HostPort);
     }
     const routed = Object.fromEntries(Object.entries(handle.services).filter(([, service]) => !service.internal));
-    try { await super.wait({ ...handle, services: routed }); }
+    try { await super.wait({ ...handle, services: routed }, deadline); }
     catch (error) { throw Object.assign(new Error(await this.redact(handle, error.message)), { exitCode: error.exitCode ?? 1 }); }
   }
   connect(handle) {
@@ -396,8 +405,23 @@ export class ComposeProvider extends DockerProvider {
   }
   async start(handle) {
     await this.sync(handle);
-    await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', '60']);
-    await this.wait(handle);
+    await this.launch(handle);
+  }
+  async launch(handle) {
+    await this.compose(handle, ['create', '--build']);
+    const deadline = Date.now() + (handle.spec.startupTimeoutSeconds ?? 60) * 1000;
+    await this.compose(handle, ['up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', String(handle.spec.startupTimeoutSeconds ?? 60)]);
+    await this.wait(handle, deadline);
+  }
+  async removeImages(handle, images = handle.ownedImages ?? []) {
+    for (const name of images) {
+      if (!name.startsWith(`${this.prefix(handle.spec)}-`) || !name.endsWith(':agent-env')) throw new Error('Refusing to remove an image outside this instance.');
+      const found = await this.docker(handle.spec, ['image', 'ls', '--filter', `reference=${name}`, '--format', '{{.Repository}}:{{.Tag}}']);
+      if (!found.split(/\s+/).includes(name)) continue;
+      const [image] = JSON.parse(await this.docker(handle.spec, ['image', 'inspect', name]));
+      if (image.Config?.Labels?.['agent-env.owner'] !== handle.spec.owner || image.Config?.Labels?.['agent-env.instance'] !== handle.spec.name) throw new Error('Refusing to remove an image with different ownership labels.');
+      await this.docker(handle.spec, ['image', 'rm', name]);
+    }
   }
   stop(handle) { return this.compose(handle, ['stop', '-t', '5']); }
   async remove(handle, purge = false) {
@@ -409,15 +433,17 @@ export class ComposeProvider extends DockerProvider {
         const found = (await this.docker(handle.spec, ['volume', 'ls', '-q', '--filter', `name=${name}`])).split(/\s+/);
         if (!found.includes(name)) continue;
         const [volume] = JSON.parse(await this.docker(handle.spec, ['volume', 'inspect', name]));
-        if (volume.Name !== name || volume.Labels?.['dev-now.owner'] !== handle.spec.owner || volume.Labels?.['com.docker.compose.project'] !== this.prefix(handle.spec)) throw new Error('Refusing to remove a volume with different ownership labels.');
+        if (volume.Name !== name || volume.Labels?.['agent-env.owner'] !== handle.spec.owner || volume.Labels?.['com.docker.compose.project'] !== this.prefix(handle.spec)) throw new Error('Refusing to remove a volume with different ownership labels.');
         volumes.push(name);
       }
       if (volumes.length) await this.docker(handle.spec, ['volume', 'rm', ...volumes]);
+      await this.removeImages(handle);
       return;
     }
     await this.compose(handle, ['down', '--remove-orphans', ...(purge ? ['--volumes'] : [])]);
+    if (purge) await this.removeImages(handle);
     await rm(handle.runtimeDirectory, { recursive: true, force: true });
-    if (handle.spec.host && handle.workspace.endsWith(`/.local/share/dev-now/${handle.spec.owner}/${handle.spec.name}`)) await this.command(handle.spec, ['rm', '-rf', '--', handle.workspace]);
+    if (handle.spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${handle.spec.owner}/${handle.spec.name}`)) await this.command(handle.spec, ['rm', '-rf', '--', handle.workspace]);
   }
   async redact(handle, output) {
     return redactEnvironment(output, JSON.parse(await readFile(join(handle.runtimeDirectory, 'redactions.json'), 'utf8')));

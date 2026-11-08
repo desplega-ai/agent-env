@@ -6,13 +6,13 @@ The `tools` service requires the `tools` profile.
 Use these commands from this directory:
 
 ```sh
-dev-now init
-dev-now env set POSTGRES_PASSWORD < /path/to/private/password-file
-dev-now up --name compose-one
-dev-now up --name compose-two --profile tools
-dev-now exec compose-one --service db -- psql -U postgres -d app -c 'select 1'
-dev-now rm compose-one --purge
-dev-now rm compose-two --purge
+agent-env init
+agent-env env set POSTGRES_PASSWORD < /path/to/private/password-file
+agent-env up --name compose-one
+agent-env up --name compose-two --profile tools
+agent-env exec compose-one --service db -- psql -U postgres -d app -c 'select 1'
+agent-env rm compose-one --purge
+agent-env rm compose-two --purge
 ```
 
 The source Compose file stays unchanged. Each instance has its own containers, network, build image, and data volume.

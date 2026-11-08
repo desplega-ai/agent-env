@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { run } from './system.mjs';
 
-const FORMAT = 'dev-now-snapshot';
+const FORMAT = 'agent-env-snapshot';
 const VERSION = 1;
 const IMAGE = 'busybox:1.37';
 const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
@@ -83,7 +83,7 @@ async function discover(handle, provider, options) {
         const volume = JSON.parse(await provider.docker(handle.spec, ['volume', 'inspect', mount.Name]))[0];
         const labels = volume.Labels ?? {};
         const project = info.Config?.Labels?.['com.docker.compose.project'];
-        const managed = labels['dev-now.owner'] && labels['dev-now.owner'] === handle.spec.owner
+        const managed = labels['agent-env.owner'] && labels['agent-env.owner'] === handle.spec.owner
           || project && labels['com.docker.compose.project'] === project;
         if (!managed) reason = 'This volume is external or has no matching ownership label.';
         else if (volume.Driver !== 'local' || Object.keys(volume.Options ?? {}).length || volume.Scope !== 'local') reason = 'This volume uses an external driver or mount options.';
@@ -123,13 +123,13 @@ async function streamDocker(provider, spec, args, { input, output }) {
 
 async function archiveVolume(provider, spec, volume, archive, options, restore = false) {
   const token = randomUUID();
-  const name = `dev-now-snapshot-${token}`;
-  const args = ['run', '--rm', ...(restore ? ['-i'] : []), '--name', name, '--label', `dev-now.snapshot=${token}`, '--network', 'none', '--read-only', '--mount', `type=volume,src=${volume},dst=/data,volume-nocopy${restore ? '' : ',readonly'}`, options.image ?? IMAGE, 'tar', '-C', '/data', restore ? '-xf' : '-cf', '-', ...(restore ? [] : ['.'])];
+  const name = `agent-env-snapshot-${token}`;
+  const args = ['run', '--rm', ...(restore ? ['-i'] : []), '--name', name, '--label', `agent-env.snapshot=${token}`, '--network', 'none', '--read-only', '--mount', `type=volume,src=${volume},dst=/data,volume-nocopy${restore ? '' : ',readonly'}`, options.image ?? IMAGE, 'tar', '-C', '/data', restore ? '-xf' : '-cf', '-', ...(restore ? [] : ['.'])];
   try { await streamDocker(provider, spec, args, restore ? { input: archive } : { output: archive }); }
   finally {
     // A failed transport can leave a helper on the remote Docker host.
     const info = await provider.docker(spec, ['inspect', name]).then(value => JSON.parse(value)[0], () => null);
-    if (info?.Config?.Labels?.['dev-now.snapshot'] === token) await provider.docker(spec, ['rm', '-f', name]);
+    if (info?.Config?.Labels?.['agent-env.snapshot'] === token) await provider.docker(spec, ['rm', '-f', name]);
   }
 }
 
@@ -272,7 +272,7 @@ export async function snapshotInstance(handle, location, provider, options = {})
     if (storage.bucket) {
       const existing = JSON.parse(await aws(options, ['list-objects-v2', '--bucket', storage.bucket, '--prefix', storage.prefix, '--max-keys', '1', '--output', 'json']));
       if (existing.Contents?.length) throw new Error('The S3 snapshot prefix already contains data. Choose a new prefix.');
-      directory = await mkdtemp(join(tmpdir(), 'dev-now-snapshot-'));
+      directory = await mkdtemp(join(tmpdir(), 'agent-env-snapshot-'));
     } else {
       directory = storage.directory;
       await mkdir(directory, { mode: 0o700 });
@@ -329,7 +329,7 @@ async function destinationVolumes(spec, manifest, provider, options) {
 /** Restore verified archives into new volumes. This function never starts services. */
 export async function restoreSnapshot(spec, location, provider, options = {}) {
   const storage = locationInfo(location);
-  const directory = await mkdtemp(join(tmpdir(), 'dev-now-restore-'));
+  const directory = await mkdtemp(join(tmpdir(), 'agent-env-restore-'));
   const created = [], token = randomUUID();
   try {
     const fetch = async name => {
@@ -365,10 +365,10 @@ export async function restoreSnapshot(spec, location, provider, options = {}) {
       // Docker volume create is idempotent. A unique claim label detects a concurrent creator.
       created.push(volume.destinationName);
       const labels = provider.snapshotVolumeLabels?.(spec, volume.destinationName) ?? {};
-      await provider.docker(spec, ['volume', 'create', '--label', `dev-now.owner=${spec.owner}`, '--label', `dev-now.restore=${token}`,
+      await provider.docker(spec, ['volume', 'create', '--label', `agent-env.owner=${spec.owner}`, '--label', `agent-env.restore=${token}`,
         ...Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]), volume.destinationName]);
       const info = JSON.parse(await provider.docker(spec, ['volume', 'inspect', volume.destinationName]))[0];
-      if (info.Labels?.['dev-now.restore'] !== token) throw new Error('Another operation created the destination volume. Restore stopped without modifying it.');
+      if (info.Labels?.['agent-env.restore'] !== token) throw new Error('Another operation created the destination volume. Restore stopped without modifying it.');
       await archiveVolume(provider, spec, volume.destinationName, join(directory, volume.archive), options, true);
     }
     return { location, manifest, volumes, restoreId: token, volumeNames: Object.fromEntries(volumes.map(volume => [volume.id, volume.destinationName])) };
@@ -377,7 +377,7 @@ export async function restoreSnapshot(spec, location, provider, options = {}) {
     for (const name of created.reverse()) {
       try {
         const info = JSON.parse(await provider.docker(spec, ['volume', 'inspect', name]))[0];
-        if (info.Labels?.['dev-now.restore'] === token) await provider.docker(spec, ['volume', 'rm', name]);
+        if (info.Labels?.['agent-env.restore'] === token) await provider.docker(spec, ['volume', 'rm', name]);
       } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     }
     if (cleanupErrors.length) error.cleanupErrors = cleanupErrors;
@@ -388,7 +388,7 @@ export async function restoreSnapshot(spec, location, provider, options = {}) {
 export async function disposeRestoredVolumes(result, spec, provider) {
   for (const volume of result.volumes) {
     const info = JSON.parse(await provider.docker(spec, ['volume', 'inspect', volume.destinationName]))[0];
-    if (info.Labels?.['dev-now.restore'] !== result.restoreId) throw new Error('The restored volume ownership changed. Cleanup stopped.');
+    if (info.Labels?.['agent-env.restore'] !== result.restoreId) throw new Error('The restored volume ownership changed. Cleanup stopped.');
     await provider.docker(spec, ['volume', 'rm', volume.destinationName]);
   }
 }

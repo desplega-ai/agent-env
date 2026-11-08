@@ -4,14 +4,24 @@ import { run, quote, freePort, reachable, delay } from '../system.mjs';
 import { home } from '../paths.mjs';
 import { hash } from '../config.mjs';
 import { join } from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { sourceExclusions } from '../source-paths.mjs';
 
 // A provider owns compute and storage. The daemon owns names and local routing.
 export class DockerProvider {
   sessions = new Map();
   sshArgs(spec, multiplex = true) {
-    const control = join(home, `ssh-${hash(`${spec.host}:${spec.sshConfig ?? ''}`)}`);
-    if (multiplex) this.sessions.set(control, spec);
+    const filename = `ssh-${hash(`${spec.host}:${spec.sshConfig ?? ''}`)}`;
+    let control = join(home, filename);
+    if (multiplex) {
+      // Reserve space for OpenSSH's temporary suffix within the macOS socket path limit.
+      if (Buffer.byteLength(control) > 80) {
+        this.controlDirectory ??= mkdtempSync('/tmp/agent-env-ssh-');
+        control = join(this.controlDirectory, filename);
+      }
+      this.sessions.set(control, spec);
+    }
     const connection = multiplex
       ? ['-o', 'ControlMaster=auto', '-S', control, '-o', 'ControlPersist=60']
       : ['-o', 'ControlMaster=no', '-S', 'none', '-o', 'ControlPersist=no'];
@@ -22,33 +32,43 @@ export class DockerProvider {
       ? run('ssh', [...this.sshArgs(spec), '--', spec.host, args.map(quote).join(' ')], options)
       : run(args[0], args.slice(1), options);
   }
-  docker(spec, args, options) { return this.command(spec, ['docker', ...args], options); }
-  prefix(spec) { return `dev-now-${spec.owner}-${spec.name}`; }
+  docker(spec, args, options = {}) {
+    const inspect = args[0] === 'inspect' || ['container', 'image', 'volume', 'network'].includes(args[0]) && args[1] === 'inspect';
+    return this.command(spec, ['docker', ...args], { ...options, ...(inspect ? { errorStdout: false } : {}) });
+  }
+  prefix(spec) { return `agent-env-${spec.owner}-${spec.name}`; }
   volume(spec, service, name) { return `${this.prefix(spec)}-${service}-${name}`; }
+  transfer(spec, source, destination, options = []) {
+    // We quote remote paths for older rsync. Prevent modern rsync from quoting them again.
+    return run('rsync', ['-az', ...options, '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), source, `${spec.host}:${quote(destination)}`], {
+      env: { ...process.env, RSYNC_OLD_ARGS: '1', RSYNC_PROTECT_ARGS: '0' },
+    });
+  }
   async sync(handle) {
     const { spec, workspace } = handle;
     if (!spec.host) return;
     await this.command(spec, ['mkdir', '-p', workspace]);
-    await run('rsync', ['-az', '--delete', ...sourceExclusions.map(rule => `--exclude=${rule}`), '-e', ['ssh', ...this.sshArgs(spec)].map(quote).join(' '), `${spec.cwd}/`, `${spec.host}:${quote(`${workspace}/`)}`]);
+    // Rapid edits can keep the same size and timestamp. Compare file contents.
+    await this.transfer(spec, `${spec.cwd}/`, `${workspace}/`, ['--checksum', '--delete', ...sourceExclusions.map(rule => `--exclude=${rule}`)]);
   }
   async create(spec) {
     await this.docker(spec, ['info', '--format', '{{.ServerVersion}}']);
-    const workspace = spec.host ? `${await this.command(spec, ['pwd'])}/.local/share/dev-now/${spec.owner}/${spec.name}` : spec.cwd;
+    const workspace = spec.host ? `${await this.command(spec, ['pwd'])}/.local/share/agent-env/${spec.owner}/${spec.name}` : spec.cwd;
     if (workspace.includes(',')) throw new Error('Workspace paths cannot contain commas.');
     const handle = { spec, workspace, services: {} };
     const newVolumes = [];
     await this.sync(handle);
     const network = this.prefix(spec);
-    await this.docker(spec, ['network', 'create', '--label', `dev-now.owner=${spec.owner}`, network]);
+    await this.docker(spec, ['network', 'create', '--label', `agent-env.owner=${spec.owner}`, network]);
     try {
       for (const [name, service] of Object.entries(spec.services)) {
         const container = `${network}-${name}`;
-        const args = ['run', '-d', '--init', '--name', container, '--label', `dev-now.owner=${spec.owner}`, '--network', network, '--network-alias', name, '-p', `127.0.0.1::${service.containerPort}`, '--mount', `type=bind,src=${workspace},dst=/workspace`, '-w', '/workspace'];
+        const args = ['run', '-d', '--init', '--name', container, '--label', `agent-env.owner=${spec.owner}`, '--network', network, '--network-alias', name, '-p', `127.0.0.1::${service.containerPort}`, '--mount', `type=bind,src=${workspace},dst=/workspace`, '-w', '/workspace'];
         for (const [volume, target] of Object.entries(service.volumes ?? {})) {
           const volumeName = this.volume(spec, name, volume);
           const exists = await this.docker(spec, ['volume', 'ls', '-q', '--filter', `name=^${volumeName}$`]);
           if (!exists) newVolumes.push(volumeName);
-          await this.docker(spec, ['volume', 'create', '--label', `dev-now.owner=${spec.owner}`, volumeName]);
+          await this.docker(spec, ['volume', 'create', '--label', `agent-env.owner=${spec.owner}`, volumeName]);
           args.push('--mount', `type=volume,src=${this.volume(spec, name, volume)},dst=${target}`);
         }
         for (const [key, value] of Object.entries({ HOST: '0.0.0.0', PORT: String(service.containerPort), ...service.env })) args.push('-e', `${key}=${value}`);
@@ -66,8 +86,8 @@ export class DockerProvider {
       throw error;
     }
   }
-  async wait(handle) {
-    const deadline = Date.now() + 60000;
+  async wait(handle, deadline = Date.now() + (handle.spec.startupTimeoutSeconds ?? 60) * 1000) {
+    const seconds = handle.spec.startupTimeoutSeconds ?? 60;
     for (const [name, service] of Object.entries(handle.services)) {
       while (true) {
         const info = JSON.parse(await this.docker(handle.spec, ['inspect', service.container]))[0];
@@ -93,7 +113,7 @@ export class DockerProvider {
           if (ready && service.health) ready = await this.docker(handle.spec, ['exec', service.container, 'sh', '-lc', service.health]).then(() => true, () => false);
           if (ready) break;
         }
-        if (Date.now() > deadline) throw new Error(`${name} did not open its port within 60 seconds. Bind the service to 0.0.0.0.`);
+        if (Date.now() > deadline) throw new Error(`${name} did not open its port within ${seconds} seconds. Bind the service to 0.0.0.0.`);
         await delay(300);
       }
     }
@@ -134,7 +154,7 @@ export class DockerProvider {
     const network = this.prefix(handle.spec);
     const networkExists = await this.docker(handle.spec, ['network', 'ls', '-q', '--filter', `name=^${network}$`]);
     if (networkExists) await this.docker(handle.spec, ['network', 'rm', network]);
-    if (handle.spec.host && handle.workspace.endsWith(`/.local/share/dev-now/${handle.spec.owner}/${handle.spec.name}`)) {
+    if (handle.spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${handle.spec.owner}/${handle.spec.name}`)) {
       await this.command(handle.spec, ['rm', '-rf', '--', handle.workspace]);
     }
     if (purge) {
@@ -151,6 +171,10 @@ export class DockerProvider {
     await Promise.all([...this.sessions.values()].map(spec =>
       run('ssh', [...this.sshArgs(spec), '-O', 'exit', '--', spec.host]).catch(() => {})));
     this.sessions.clear();
+    if (this.controlDirectory) {
+      await rm(this.controlDirectory, { recursive: true, force: true });
+      this.controlDirectory = undefined;
+    }
   }
   async status(handle) {
     return Object.fromEntries(await Promise.all(Object.entries(handle.services).map(async ([name, service]) => {
@@ -170,7 +194,7 @@ export class DockerProvider {
     const created = [];
     try {
       for (const { source, destination } of volumes) {
-        await this.docker(spec, ['volume', 'create', '--label', `dev-now.owner=${spec.owner}`, destination]);
+        await this.docker(spec, ['volume', 'create', '--label', `agent-env.owner=${spec.owner}`, destination]);
         created.push(destination);
         await this.docker(spec, ['run', '--rm', '--mount', `type=volume,src=${source},dst=/source,readonly`, '--mount', `type=volume,src=${destination},dst=/destination`, 'alpine:3', 'sh', '-c', 'cp -a /source/. /destination/']);
       }

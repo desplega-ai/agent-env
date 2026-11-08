@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { mkdir, open, unlink, rm, stat } from 'node:fs/promises';
+import { mkdir, open, unlink, rm, stat, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { trustTls } from '../src/tls.mjs';
@@ -13,38 +13,39 @@ import { addService } from '../src/goodies.mjs';
 import { setEnvironmentSecret, listEnvironmentSecrets, unsetEnvironmentSecret } from '../src/environments.mjs';
 import { delay } from '../src/system.mjs';
 
-const help = `dev-now: development services with stable localhost addresses
+const help = `agent-env: development services with stable localhost addresses
 
-  dev-now init                       Create dev-now.json
-  dev-now add postgres | redis       Add a persistent service
-  dev-now up [--ssh user@host]        Start the configured stack
-  dev-now up NAME                    Resume the saved instance from any directory
-  dev-now up --name demo --port 3000 -- node server.js
-  dev-now list                       Show services and addresses
-  dev-now ui                         Open the local status dashboard
-  dev-now https [--https-port 8443]   Enable local HTTPS
-  dev-now trust                      Trust the local certificate authority
-  dev-now use NAME                   Select NAME for bare localhost
-  dev-now logs NAME [--service web]  Read recent service logs
-  dev-now exec NAME [--service db] -- COMMAND [ARGS...]
-  dev-now sync NAME                  Copy local changes to an SSH host
-  dev-now env set KEY [--from-env VAR] Store a secret from stdin or a variable
-  dev-now env list | unset KEY       Manage secret names for --env NAME
-  dev-now snapshot NAME LOCATION     Save stopped volumes locally or to S3
-  dev-now restore LOCATION --name NAME  Restore into a new instance
-  dev-now down NAME | --all          Stop containers and retain data
-  dev-now fork SOURCE DEST [--worktree PATH]  Fork stopped data and optional source files
-  dev-now rm NAME [--purge]          Remove containers, optionally data
-  dev-now daemon stop               Stop routing and retain containers
+  agent-env init                       Create agent-env.json
+  agent-env add postgres | redis       Add a persistent service
+  agent-env up [--ssh user@host]        Start the configured stack
+  agent-env up NAME                    Resume the saved instance from any directory
+  agent-env up --name demo --port 3000 -- node server.js
+  agent-env list                       Show services and addresses
+  agent-env ui                         Open the local status dashboard
+  agent-env https [--https-port 8443]   Enable local HTTPS
+  agent-env trust                      Trust the local certificate authority
+  agent-env use NAME                   Select NAME for bare localhost
+  agent-env logs NAME [--service web]  Read recent service logs
+  agent-env exec NAME [--service db] -- COMMAND [ARGS...]
+  agent-env sync NAME                  Copy local changes to an SSH host
+  agent-env env set KEY [--from-env VAR] Store a secret from stdin or a variable
+  agent-env env list | unset KEY       Manage secret names for --env NAME
+  agent-env snapshot NAME LOCATION     Save stopped volumes locally or to S3
+  agent-env restore LOCATION --name NAME  Restore into a new instance
+  agent-env down NAME | --all          Stop containers and retain data
+  agent-env fork SOURCE DEST [--worktree PATH]  Fork stopped data and optional source files
+  agent-env rm NAME [--purge]          Remove containers, optionally data
+  agent-env daemon stop               Stop routing and retain containers
 
 Options:
   --name NAME, --port PORT, --image IMAGE, --config FILE, --service NAME, --json
   --ssh HOST, --ssh-config FILE, --local, --provider NAME, --adapter FILE
   --cloud hetzner, --cloud-type TYPE, --location LOCATION
   --idle-minutes MINUTES, --ttl-hours HOURS (require a cloud target)
-  --env NAME, --env-file FILE, --from-env VARIABLE
+  --env NAME, --env-file FILE, --no-env-file, --from-env VARIABLE
+  --version                         Show the installed package version
   --compose-file FILE, --profile NAME (repeat for multiple files or profiles)
-  --https, --https-port PORT, --no-watch
+  --https, --https-port PORT, --no-watch, --timeout SECONDS (startup, default 60)
   --worktree PATH, --branch BRANCH, --ref REF
   --endpoint URL, --omit-mounts, --all, --purge
   --remove-worktree, --discard-worktree (requires --remove-worktree)
@@ -52,7 +53,7 @@ Options:
 Requires Node 22+ and Docker. SSH targets require Docker, rsync, and Bash.
 HTTP supports named hosts and WebSockets. TCP uses the selected instance.
 `;
-function request(message, timeout = 600000) {
+function request(message, timeout = message.type === 'resume' ? (message.startupTimeoutSeconds ?? 3600) * 1000 + 120000 : Math.max(600000, (message.spec?.startupTimeoutSeconds ?? 0) * 1000 + 120000)) {
   return new Promise((resolve, reject) => {
     const req = http.request({ socketPath, path: '/', method: 'POST', headers: { 'content-type': 'application/json' } }, async response => {
       try {
@@ -63,7 +64,7 @@ function request(message, timeout = 600000) {
         resolve(result);
       } catch (error) { reject(error); }
     });
-    req.setTimeout(timeout, () => req.destroy(new Error('The daemon request timed out. Check dev-now list before retrying.')));
+    req.setTimeout(timeout, () => req.destroy(new Error('The daemon request timed out. Check agent-env list before retrying.')));
     req.on('error', reject);
     req.end(JSON.stringify(message));
   });
@@ -103,7 +104,7 @@ async function ensureDaemon() {
 function display(result, json) {
   if (json) { console.log(JSON.stringify(result, null, 2)); return; }
   if (Array.isArray(result)) {
-    if (!result.length) console.log('No instances. Run dev-now up.');
+    if (!result.length) console.log('No instances. Run agent-env up.');
     for (const item of result) typeof item === 'string' ? console.log(item) : display(item, false);
   } else if (result.url) console.log(result.url);
   else if ('output' in result) console.log(result.output);
@@ -124,7 +125,9 @@ async function main() {
   const separator = args.indexOf('--');
   const command = separator < 0 ? [] : args.splice(separator).slice(1);
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
-    'env-file': { type: 'string', multiple: true }, 'from-env': { type: 'string' },
+    'env-file': { type: 'string', multiple: true }, 'no-env-file': { type: 'boolean' }, 'from-env': { type: 'string' },
+    version: { type: 'boolean', short: 'v' },
+    timeout: { type: 'string' },
     'remove-worktree': { type: 'boolean' }, 'discard-worktree': { type: 'boolean' }, 'omit-mounts': { type: 'boolean' },
     cloud: { type: 'string' }, 'cloud-type': { type: 'string' }, location: { type: 'string' }, 'idle-minutes': { type: 'string' }, 'ttl-hours': { type: 'string' },
     provider: { type: 'string' }, adapter: { type: 'string' }, env: { type: 'string' }, profile: { type: 'string', multiple: true }, 'compose-file': { type: 'string', multiple: true },
@@ -135,12 +138,17 @@ async function main() {
     json: { type: 'boolean' }, all: { type: 'boolean' }, purge: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   } });
   const [type, name, destination] = positionals;
+  if (values.version) {
+    const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+    console.log(values.json ? JSON.stringify({ version }) : version);
+    return;
+  }
   if (!type || values.help || type === 'help') { console.log(help); return; }
   if (type === 'trust') { display(await trustTls(), values.json); return; }
   if (type === 'add') { display(await addService(name, { config: values.config, port: values.port, environment: values.env }), values.json); return; }
   if (type === 'init') {
     const result = await initialize({ config: values.config, command, port: values.port, image: values.image });
-    display({ message: `Created ${result.filename}. Run dev-now up.` }, values.json);
+    display({ message: `Created ${result.filename}. Run agent-env up.` }, values.json);
     return;
   }
   if (type === 'env') {
@@ -167,7 +175,7 @@ async function main() {
     }
     throw new Error('The daemon is still stopping. Wait for the current operation to finish.');
   }
-  if (!['up', 'list', 'use', 'logs', 'exec', 'sync', 'down', 'rm', 'fork', 'ui', 'https', 'snapshot', 'restore'].includes(type)) throw new Error(`Unknown command: ${type}. Run dev-now --help.`);
+  if (!['up', 'list', 'use', 'logs', 'exec', 'sync', 'down', 'rm', 'fork', 'ui', 'https', 'snapshot', 'restore'].includes(type)) throw new Error(`Unknown command: ${type}. Run agent-env --help.`);
   if (!['up', 'list', 'ui', 'https', 'restore'].includes(type) && !name && !(values.all && ['down', 'rm'].includes(type))) throw new Error(`Specify an instance name for ${type}.`);
   if (['fork', 'snapshot'].includes(type) && !destination) throw new Error('Specify a destination name.');
   if (type === 'exec' && !command.length) throw new Error('Specify a command after --.');
@@ -182,8 +190,9 @@ async function main() {
   if (type === 'https') message.port = Number(values['https-port'] ?? 8443);
   if (type === 'ui') message.port = Number(values.port ?? 4780);
   if (type === 'up' && name) {
-    if (destination || command.length || Object.keys(values).some(key => !['https', 'https-port', 'json'].includes(key))) throw new Error('Use up NAME without configuration options to resume a saved instance.');
+    if (destination || command.length || Object.keys(values).some(key => !['https', 'https-port', 'json', 'timeout'].includes(key))) throw new Error('Use up NAME without configuration options to resume a saved instance.');
     message.type = 'resume';
+    if (values.timeout !== undefined) message.startupTimeoutSeconds = Number(values.timeout);
   } else if (type === 'up' || type === 'restore') {
     message.spec = await loadSpec(values, command);
     if (values.provider) message.spec.provider = values.provider;
@@ -198,4 +207,4 @@ async function main() {
     display((await request({ type: 'list' })).find(item => item.name === result.name), values.json);
   } else display(result, values.json);
 }
-main().catch(error => { console.error(`dev-now: ${error.message}`); process.exitCode = error.exitCode ?? 1; });
+main().catch(error => { console.error(`agent-env: ${error.message}`); process.exitCode = error.exitCode ?? 1; });

@@ -25,7 +25,7 @@ export function selectTarget(request, targets, selected) {
     }
   }
   const target = targets.get(id);
-  return target ? { target, focused, id } : { status: 404, error: 'No running service matches this address. Run dev-now list.' };
+  return target ? { target, focused, id } : { status: 404, error: 'No running service matches this address. Run agent-env list.' };
 }
 
 function headersFor(request, port, id, secure = false) {
@@ -74,7 +74,7 @@ export function createProxy(port, getRoutes, options = {}) {
     });
     upstream.on('error', () => {
       if (!response.headersSent) response.writeHead(502, { 'content-type': 'text/plain' });
-      response.end('The service did not answer. Run dev-now logs <name>.\n');
+      response.end('The service did not answer. Run agent-env logs <name>.\n');
     });
     request.on('aborted', () => upstream.destroy());
     response.on('close', () => upstream.destroy());

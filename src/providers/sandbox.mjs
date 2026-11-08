@@ -132,7 +132,8 @@ export class SandboxProvider {
     return { adapter, location };
   }
   async operation(operation, handle, ...args) {
-    await this.validateHandle(handle);
+    const { location } = await this.validateHandle(handle);
+    if (operation === 'start' && location === 'docker') handle.runtime.spec = structuredClone(handle.spec);
     const result = await this.invoke(operation, handle.spec, [handle.runtime, ...args]);
     serializableHandle(handle.runtime);
     handle.services = handle.runtime.services;

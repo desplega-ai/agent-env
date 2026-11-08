@@ -66,7 +66,7 @@ async function copySourceFile(sourceRoot, destination, path) {
 async function recordPath(ownership) {
   if (ownership?.version !== 1 || !/^[0-9a-f-]{36}$/.test(ownership.token ?? '')) throw new Error('Valid worktree ownership metadata is required.');
   const commonDir = await realpath(ownership.commonDir);
-  return join(commonDir, 'dev-now-worktrees', `${ownership.token}.json`);
+  return join(commonDir, 'agent-env-worktrees', `${ownership.token}.json`);
 }
 
 /** Create a Git worktree and copy the current source changes into it. */
@@ -103,7 +103,7 @@ export async function createWorktree(sourceSpec, destinationName, options = {}) 
     branchCreated = true;
     await git(sourceRoot, ['worktree', 'add', '--', destination, branch]);
     added = true;
-    await mkdir(join(commonDir, 'dev-now-worktrees'), { recursive: true, mode: 0o700 });
+    await mkdir(join(commonDir, 'agent-env-worktrees'), { recursive: true, mode: 0o700 });
     await writeFile(await recordPath(ownership), JSON.stringify(ownership), { flag: 'wx', mode: 0o600 });
     saved = true;
     if (patch?.length) await git(destination, ['apply', '--binary', '--whitespace=nowarn', '-'], patch);

@@ -1,45 +1,59 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
+<img src="assets/icon.svg" width="64" height="64" alt="agent-env Workspace logo">
 
-# dev-now
+# agent-env
 
 Run a development stack locally, over SSH, or on an on-demand Hetzner machine. Open each instance through localhost.
 
-The CLI uses Node 22+, Docker, and a local routing daemon. It has no npm dependencies.
+Part of [Desplega Labs](https://desplega.sh), alongside [Agent Swarm](https://github.com/desplega-ai/agent-swarm) and [agent-fs](https://github.com/desplega-ai/agent-fs).
+Released under the [MIT license](LICENSE).
+
+The CLI runs on macOS or Linux with Node 22+, Docker, and a local routing daemon. It has no npm dependencies.
 [Tesser](https://tesser.sh/) inspired the workflow. [Portless](https://github.com/vercel-labs/portless) informed the shared HTTPS proxy and local certificate authority.
 
 ## Start
 
+Install the published package:
+
 ```sh
-npm link --ignore-scripts --no-audit --no-fund
+npm install -g @desplega.ai/agent-env
+```
+
+For a source checkout, run `npm link --ignore-scripts --no-audit --no-fund` in this repository instead.
+
+```sh
 cd /path/to/project
-dev-now init
-dev-now up --name app --https
-dev-now ui
+agent-env init
+agent-env up --name app --https
+agent-env ui
 ```
 
 `init` detects Compose files, package scripts, package managers, and common framework ports.
 It never replaces an existing configuration or edits package scripts.
+For a first dependency installation, use `agent-env up --timeout 900` or set `startupTimeoutSeconds` in `agent-env.json`.
+Compose builds and image downloads finish before its shared readiness timeout begins.
 For an unknown project, supply a command:
 
 ```sh
-dev-now init --port 3000 --image node:22-bookworm-slim -- node server.js
+agent-env init --port 3000 --image node:22-bookworm-slim -- node server.js
 ```
 
 For the included example:
 
 ```sh
 cd examples/hello
-dev-now up --name demo
+agent-env up --name demo
 ```
 
 Open `http://demo.localhost:3300`. The example also provides Postgres on `localhost:55432` with development-only credentials.
 
+For a full application, use the [Agent Swarm development example](docs/agent-swarm.md).
+
 ## Local and remote
 
 ```sh
-dev-now up --name local --local
-dev-now up --name remote --ssh user@server
-dev-now use remote
+agent-env up --name local --local
+agent-env up --name remote --ssh user@server
+agent-env use remote
 ```
 
 Both instances retain named addresses, such as `local.localhost:3000` and `remote.localhost:3000`.
@@ -50,8 +64,8 @@ SSH targets need Docker, rsync, Bash, and `timeout`. The local machine needs SSH
 Use an SSH alias or `--ssh-config FILE` for keys and ports. Existing SSH hosts require verified host keys.
 
 Remote source synchronization starts automatically and follows file edits. Use `--no-watch` for manual synchronization.
-`dev-now sync remote` synchronizes immediately. The daemon reconnects failed SSH tunnels with bounded retry intervals.
-Synchronization excludes Git metadata, dependencies, common build directories, `.dev-now`, and `.env*` files.
+`agent-env sync remote` synchronizes immediately. The daemon reconnects failed SSH tunnels with bounded retry intervals.
+Synchronization excludes Git metadata, dependencies, common build directories, `.agent-env`, and `.env*` files.
 Generated directories such as `build` and `dist` are excluded at the checkout root. Nested source paths such as `src/build` remain available.
 Remote Compose validates bind mounts, build contexts, and Dockerfiles against the same rules.
 Keep other credentials outside the source tree. Explicit Compose secret files use a separate private transfer.
@@ -61,8 +75,8 @@ Keep other credentials outside the source tree. Explicit Compose secret files us
 Existing `compose.yaml`, `compose.yml`, and `docker-compose.*` files work directly, without `init`.
 
 ```sh
-dev-now up --name app --profile tools
-dev-now up --name remote --compose-file compose.yaml --compose-file compose.dev.yaml --ssh my-host
+agent-env up --name app --profile tools
+agent-env up --name remote --compose-file compose.yaml --compose-file compose.dev.yaml --ssh my-host
 ```
 
 The provider preserves builds, dependencies, health checks, profiles, networks, and named volumes.
@@ -76,17 +90,47 @@ See the [Compose example and contract](examples/compose/README.md).
 
 ## Environments and secrets
 
+`agent-env up` reads `.env` and `.env.local` automatically when those files exist.
+`agent-env up --env review` also reads `.env.review` and `.env.review.local`, in that order.
+A named dotenv file can define an environment without a JSON overlay.
+Files with names such as `.env.example` never load automatically.
+
 ```sh
-dev-now env set POSTGRES_PASSWORD --from-env MY_DATABASE_PASSWORD
-# Or: dev-now env set POSTGRES_PASSWORD < /path/to/private/password-file
-dev-now env list
-dev-now env unset POSTGRES_PASSWORD
+agent-env up                         # Uses the project's dotenv files
+agent-env up --env review            # Adds the review dotenv files
+agent-env up --env-file .env.custom  # Replaces automatic file selection
+agent-env up --no-env-file           # Disables global dotenv files
+```
+
+For native Docker services, later files override earlier files.
+Private stored values override files, configuration values override the private store, and service values override the project configuration.
+Native Docker treats file values literally. It never executes shell commands or expands `${VARIABLE}` expressions.
+The parent shell enters native containers only through explicit `{ "env": "NAME" }` references.
+
+Compose keeps its own interpolation rules and shell precedence.
+Private stored values and explicit project configuration override the Compose interpolation environment.
+Each Compose service still declares its container variables with `environment` or `env_file`.
+`--no-env-file` disables global dotenv files. It does not disable service `env_file` declarations.
+
+Environment files stay outside remote source synchronization.
+The CLI resolves values locally and sends the required container configuration over SSH.
+Saved instances retain their resolved values. Use `up --name NAME` to load edited files, or `up NAME` to resume saved values.
+For Docker and Compose, environment-only changes recreate containers and retain their named volumes.
+Use `up NAME --timeout 900` to increase the startup timeout of a saved instance.
+
+```sh
+agent-env env set POSTGRES_PASSWORD --from-env MY_DATABASE_PASSWORD
+# Or: agent-env env set POSTGRES_PASSWORD < /path/to/private/password-file
+agent-env env list
+agent-env env unset POSTGRES_PASSWORD
 ```
 
 Secret commands accept `--env NAME`. Values stay in a private store outside the checkout.
 The CLI prints secret names only.
-Logs and execution output redact private store values, secret references, environment references, and values from environment files.
-Credential names such as `PASSWORD`, `TOKEN`, and `API_KEY` also trigger redaction. Ordinary literal ports, hosts, and database names remain readable.
+Logs and execution output redact private store values, secret references, and explicit environment references.
+Credential names such as `PASSWORD`, `TOKEN`, and `API_KEY` also trigger redaction, including values loaded from dotenv files.
+Credential URLs and common token formats also trigger redaction. Ordinary ports, hosts, modes, and database names remain readable.
+Store secrets with unusual variable names in the private store, or use an explicit secret reference.
 
 ```json
 {
@@ -103,26 +147,25 @@ Credential names such as `PASSWORD`, `TOKEN`, and `API_KEY` also trigger redacti
 ```
 
 ```sh
-dev-now env set POSTGRES_PASSWORD --env review --from-env MY_DATABASE_PASSWORD
-dev-now up --env review --name review
+agent-env env set POSTGRES_PASSWORD --env review --from-env MY_DATABASE_PASSWORD
+agent-env up --env review --name review
 ```
 
 Values can be strings, `{ "secret": "KEY" }`, or `{ "env": "SHELL_VARIABLE" }`.
 Repeated `--env-file FILE` options select explicit environment files.
-Native Docker environment files contain literal values. Compose retains its own interpolation rules.
-Compose container variables still follow each service's `environment` configuration.
+Set `envFiles: []` in `agent-env.json` to disable automatic dotenv files for that configuration.
 
 ## Services and caching
 
 ```sh
-dev-now add postgres
-dev-now add redis
-dev-now up
+agent-env add postgres
+agent-env add redis
+agent-env up
 ```
 
 Postgres defaults to public port 55432. Redis defaults to 56379. Use `--port` to select another port.
 Both services retain data in named volumes. Postgres receives a generated password in the private environment store.
-Compose projects receive a separate `dev-now.addons.json` override.
+Compose projects receive a separate `agent-env.addons.json` override.
 Use `add postgres --env review` to add the service and its secret only to the `review` environment.
 Compose uses a separate override file for each selected environment.
 
@@ -151,10 +194,10 @@ Named volumes retain dependencies and package caches. Docker retains build and i
 Authenticate the installed `hcloud` CLI, then run:
 
 ```sh
-dev-now up --name cloud --cloud hetzner --location hel1
-dev-now down cloud
-dev-now up cloud
-dev-now rm cloud --purge
+agent-env up --name cloud --cloud hetzner --location hel1
+agent-env down cloud
+agent-env up cloud
+agent-env rm cloud --purge
 ```
 
 The CLI provisions Docker and Compose, generates dedicated SSH credentials, and pins the host identity before connecting.
@@ -183,8 +226,8 @@ The CLI reads effective settings through [hcloud config](https://github.com/hetz
 Stop the source before copying database volumes:
 
 ```sh
-dev-now down app
-dev-now fork app experiment --worktree ../experiment --branch experiment
+agent-env down app
+agent-env fork app experiment --worktree ../experiment --branch experiment
 ```
 
 This creates a Git worktree, copies current source changes, copies volumes, and starts the fork.
@@ -195,19 +238,19 @@ Forks require a new destination name and run on the source Docker host.
 Resume a saved fork from any directory:
 
 ```sh
-dev-now down experiment
-dev-now up experiment
+agent-env down experiment
+agent-env up experiment
 ```
 
 `up NAME` uses the saved configuration, including resolved secrets and the source path.
 `up --name NAME` loads the current project's configuration and checks it against the saved instance.
 
 ```sh
-dev-now snapshot app /existing/backups/checkpoint
-dev-now restore /existing/backups/checkpoint --name restored
+agent-env snapshot app /existing/backups/checkpoint
+agent-env restore /existing/backups/checkpoint --name restored
 
-dev-now snapshot app s3://my-bucket/checkpoint
-dev-now restore s3://my-bucket/checkpoint --name restored --ssh my-host
+agent-env snapshot app s3://my-bucket/checkpoint
+agent-env restore s3://my-bucket/checkpoint --name restored --ssh my-host
 ```
 
 Restore uses the current project's configuration and creates fresh volumes before starting services.
@@ -225,9 +268,9 @@ See [snapshot format and worktree ownership](docs/snapshots-and-worktrees.md).
 ## HTTPS and status UI
 
 ```sh
-dev-now https --https-port 8443
-dev-now trust
-dev-now ui --port 4780
+agent-env https --https-port 8443
+agent-env trust
+agent-env ui --port 4780
 ```
 
 HTTPS uses a private local CA and one loopback proxy. HTTP/2, HTTP/1.1, and WebSocket upgrades are supported.
@@ -241,7 +284,7 @@ Linux trust installation requires sudo permission. Some browsers and runtimes ma
 For curl without OS trust installation:
 
 ```sh
-curl --cacert ~/.local/state/dev-now/tls/ca.pem \
+curl --cacert ~/.local/state/agent-env/tls/ca.pem \
   --resolve app.localhost:8443:127.0.0.1 https://app.localhost:8443/
 ```
 
@@ -252,17 +295,20 @@ Application pages contain no injected browser controls.
 ## Lifecycle and provider boundaries
 
 ```sh
-dev-now list
-dev-now logs app --service web
-dev-now exec app --service postgres -- psql -U postgres -d app -c 'select 1'
-dev-now down app
-dev-now rm app --purge
-dev-now daemon stop
+agent-env list
+agent-env logs app --service web
+agent-env exec app --service postgres -- psql -U postgres -d app -c 'select 1'
+agent-env down app
+agent-env rm app --purge
+agent-env daemon stop
 ```
 
-`down` retains containers and data. `rm` removes containers and retains volumes. `rm --purge` also removes managed volumes.
+`down` retains containers and data. `rm` removes containers and retains volumes and built images.
+`rm --purge` also removes managed volumes and the instance's owned Compose image tags.
+Shared base images and Docker build caches remain available.
 For a removed local instance, recreate it with `up` before purging its retained volumes.
-Configuration changes require `rm`, then `up`.
+Changes to ports, images, commands, mounts, or providers require `rm`, then `up`.
+Environment-only changes use `up --name NAME` and preserve volumes.
 `daemon stop` stops routing, synchronization, and lifecycle timers. Containers remain running.
 The next command restores saved routing and enabled UI/HTTPS listeners.
 
@@ -270,7 +316,7 @@ Worktrees remain after instance removal by default.
 `rm NAME --remove-worktree` removes an owned clean worktree.
 Add `--discard-worktree` only when you intend to discard its changed and ignored files.
 
-State defaults to `~/.local/state/dev-now`. `DEV_NOW_HOME` selects an isolated private state directory.
+State defaults to `~/.local/state/agent-env`. `AGENT_ENV_HOME` selects an isolated private state directory.
 State can contain environment values. Back up cloud ownership records and credentials before moving it.
 All application ports bind loopback. Remote traffic travels through SSH.
 
@@ -288,9 +334,9 @@ npm test
 npm run test:e2e
 npm run test:runtime
 npm run test:features
-DEV_NOW_TEST_SSH=my-host DEV_NOW_TEST_SSH_CONFIG=/path/to/config npm run test:features
+AGENT_ENV_TEST_SSH=my-host AGENT_ENV_TEST_SSH_CONFIG=/path/to/config npm run test:features
 # Creates and deletes one billed Hetzner machine:
-DEV_NOW_TEST_CLOUD=1 npm run test:cloud
+AGENT_ENV_TEST_CLOUD=1 npm run test:cloud
 ```
 
 Tests create isolated resources and remove them afterward. SSH tests use an existing host without provisioning or deleting it.

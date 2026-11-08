@@ -12,7 +12,12 @@ export function run(command, args, options = {}) {
     child.stdout?.on('data', data => { stdout += data; });
     child.stderr?.on('data', data => { stderr += data; if (options.combined) stdout += data; });
     child.on('error', reject);
-    child.on('close', code => code === 0 ? resolve(stdout.trimEnd()) : reject(Object.assign(new Error(`${command} failed (${code}): ${stderr.trim() || stdout.trim()}`), { exitCode: code ?? 1 })));
+    child.on('close', code => {
+      if (code === 0) return resolve(stdout.trimEnd());
+      const output = options.errorStdout === false ? stderr.trimEnd()
+        : options.combined ? stdout.trimEnd() : [stdout.trimEnd(), stderr.trimEnd()].filter(Boolean).join('\n');
+      reject(Object.assign(new Error(`${command} failed (${code}): ${output}`), { exitCode: code ?? 1 }));
+    });
   });
 }
 export async function freePort() {

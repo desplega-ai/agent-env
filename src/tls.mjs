@@ -19,7 +19,7 @@ async function generateTls(directory, hosts) {
   const exists = path => readFile(path).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
   if (await exists(ca) !== await exists(caKey)) throw new Error('The local CA is incomplete. Restore its certificate and key before enabling HTTPS.');
   const config = join(directory, 'openssl.cnf');
-  await writeFile(config, `[req]\ndistinguished_name=dn\nx509_extensions=ca\nprompt=no\n[dn]\nCN=dev-now local development\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nnameConstraints=critical,permitted;DNS:localhost,permitted;DNS:.localhost,permitted;IP:127.0.0.1/255.255.255.255,permitted;IP:::1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff\n[server]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,DNS:*.localhost,IP:127.0.0.1,IP:::1${hosts.map(host => `,DNS:${host}`).join('')}\n`, { mode: 0o600 });
+  await writeFile(config, `[req]\ndistinguished_name=dn\nx509_extensions=ca\nprompt=no\n[dn]\nCN=agent-env local development\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nnameConstraints=critical,permitted;DNS:localhost,permitted;DNS:.localhost,permitted;IP:127.0.0.1/255.255.255.255,permitted;IP:::1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff\n[server]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,DNS:*.localhost,IP:127.0.0.1,IP:::1${hosts.map(host => `,DNS:${host}`).join('')}\n`, { mode: 0o600 });
   try {
     if (!await exists(ca)) {
       await run('openssl', ['ecparam', '-genkey', '-name', 'prime256v1', '-noout', '-out', caKey]);
@@ -29,7 +29,7 @@ async function generateTls(directory, hosts) {
     const authority = new X509Certificate(await readFile(ca));
     const publicKey = createPublicKey(createPrivateKey(await readFile(caKey))).export({ type: 'spki', format: 'der' });
     if (!authority.publicKey.export({ type: 'spki', format: 'der' }).equals(publicKey)) throw new Error('The local CA certificate and key do not match. Restore the matching pair before enabling HTTPS.');
-    await run('openssl', ['x509', '-checkend', '86400', '-noout', '-in', ca]).catch(() => { throw new Error('The local CA is expired. Replace it and repeat dev-now trust.'); });
+    await run('openssl', ['x509', '-checkend', '86400', '-noout', '-in', ca]).catch(() => { throw new Error('The local CA is expired. Replace it and repeat agent-env trust.'); });
     const oldNames = await readFile(join(directory, 'names.json'), 'utf8').catch(() => '');
     const valid = oldNames === JSON.stringify(hosts) && await exists(key) && await exists(cert) && await run('openssl', ['x509', '-checkend', '86400', '-noout', '-in', cert]).then(() => true, () => false);
     if (!valid) {
@@ -50,8 +50,8 @@ export async function trustTls() {
   if (platform() === 'darwin') {
     await run('security', ['add-trusted-cert', '-r', 'trustRoot', '-k', join(homedir(), 'Library/Keychains/login.keychain-db'), caPath]);
   } else if (platform() === 'linux') {
-    await run('sudo', ['-n', 'install', '-m', '0644', caPath, '/usr/local/share/ca-certificates/dev-now.crt']);
+    await run('sudo', ['-n', 'install', '-m', '0644', caPath, '/usr/local/share/ca-certificates/agent-env.crt']);
     await run('sudo', ['-n', 'update-ca-certificates']);
   } else throw new Error(`Install ${caPath} in your user trust store. Automatic trust supports macOS and Debian-based Linux.`);
-  return { message: `Trusted the dev-now local CA: ${caPath}` };
+  return { message: `Trusted the agent-env local CA: ${caPath}` };
 }

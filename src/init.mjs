@@ -62,7 +62,7 @@ export async function createInitialConfig(options = {}) {
 export async function initialize(options = {}) {
   const cwd = await realpath(options.cwd ?? process.cwd());
   const config = await createInitialConfig({ ...options, cwd });
-  const filename = resolve(cwd, options.config ?? 'dev-now.json');
+  const filename = resolve(cwd, options.config ?? 'agent-env.json');
   await writeFile(filename, `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx' });
   return { filename, config };
 }

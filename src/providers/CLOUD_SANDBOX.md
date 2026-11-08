@@ -89,8 +89,8 @@ It creates one dedicated SSH key and one labeled primary IPv4 address before it 
 The server uses that address and disables automatic IPv6 allocation.
 The module creates no volumes, snapshots, or hosted credentials.
 
-Records reside under `$DEV_NOW_HOME/cloud/<instance-hash>/`.
-The default home is `~/.local/state/dev-now`.
+Records reside under `$AGENT_ENV_HOME/cloud/<instance-hash>/`.
+The default home is `~/.local/state/agent-env`.
 Directories use mode `0700`.
 Records, private keys, SSH config, and known hosts use mode `0600`.
 Public keys remain inside the private directory.
@@ -103,16 +103,16 @@ Locks publish complete owner files atomically. Recovery supports dead owners and
 
 Each remote resource has these labels:
 
-- `dev-now.owner`: the installation owner.
-- `dev-now.instance`: the instance name.
-- `dev-now.record`: a random ownership token from the private record.
+- `agent-env.owner`: the installation owner.
+- `agent-env.instance`: the instance name.
+- `agent-env.record`: a random ownership token from the private record.
 
 The module stores creation intent before each external allocation.
 It reconciles remote resources by token, name, labels, and stored ID after restart.
 It refuses multiple matches, changed ownership, or conflicting IDs.
 A missing recorded resource never causes automatic replacement.
 An ambiguous creation with no visible resource also blocks replacement.
-Use `dev-now rm NAME --purge` before a new allocation.
+Use `agent-env rm NAME --purge` before a new allocation.
 
 Purge checks every resource before its first deletion.
 It refuses a foreign IP assignment or an untracked primary IPv6 address.
@@ -217,7 +217,7 @@ It needs no hosted credentials.
 A local bridge module can also reuse it:
 
 ```js
-import { createDockerSandboxAdapter } from '/absolute/dev-now/src/providers/sandbox.mjs';
+import { createDockerSandboxAdapter } from '/absolute/agent-env/src/providers/sandbox.mjs';
 export function createAdapter() {
   return createDockerSandboxAdapter();
 }
@@ -228,14 +228,13 @@ export function createAdapter() {
 ```sh
 node --check src/cloud.mjs
 node --check src/providers/sandbox.mjs
-node --test test/cloud.test.mjs test/sandbox.test.mjs
-npm test
 npm run check
+AGENT_ENV_TEST_SANDBOX=1 node test/run.mjs docker
+# Requires an explicitly selected Hetzner test project and creates billed resources:
+AGENT_ENV_TEST_CLOUD=1 node test/run.mjs cloud
 ```
 
-Cloud tests use an injected stateful CLI runner and real local SSH key generation.
-They never call the live Hetzner API.
-Sandbox tests import a local ESM module and test the real Docker provider with a simulated Docker CLI runner.
-They use a real loopback listener for service readiness.
-They allocate no live containers or cloud infrastructure.
-Live provisioning and the registered Docker sandbox bridge passed integration tests. See VERIFICATION.md.
+Set `AGENT_ENV_CLI` to the absolute path of an installed package executable.
+The sandbox suite exercises the public CLI against the real Docker bridge.
+The cloud suite exercises the public CLI against real Hetzner infrastructure and removes its owned resources.
+Ordinary CI does not run the cloud suite. See [CI and releases](../../docs/releases.md).
