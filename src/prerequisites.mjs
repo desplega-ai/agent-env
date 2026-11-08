@@ -12,7 +12,10 @@ export async function checkDocker({ compose = false, engine = false } = {}) {
     catch { throw new Error('Docker Compose is unavailable. Install the Compose plugin and check docker compose version.'); }
   }
   if (engine) {
-    try { await run('docker', ['info', '--format', '{{.ServerVersion}}'], { timeout: 10000 }); }
+    try {
+      const version = JSON.parse(await run('docker', ['info', '--format', '{{json .ServerVersion}}'], { timeout: 10000 }));
+      if (typeof version !== 'string' || !version.trim()) throw new Error('No Docker server version.');
+    }
     catch { throw new Error('The Docker engine is unavailable. Start Docker and check docker info for the selected context and permissions.'); }
   }
 }
