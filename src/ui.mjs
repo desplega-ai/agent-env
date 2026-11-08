@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { once } from 'node:events';
 
 export async function startUi({ port = 4780, status, logs }) {
-  const [html, script] = await Promise.all(['ui.html', 'ui-client.js'].map(file => readFile(new URL(file, import.meta.url))));
+  const [html, script, icon] = await Promise.all(['ui.html', 'ui-client.js', '../assets/icon.svg'].map(file => readFile(new URL(file, import.meta.url))));
   const server = http.createServer(async (request, response) => {
     const send = (code, data, type = 'application/json') => {
       response.writeHead(code, { 'content-type': `${type}; charset=utf-8`, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
@@ -20,6 +20,7 @@ export async function startUi({ port = 4780, status, logs }) {
     try {
       if (url.pathname === '/') return send(200, html, 'text/html');
       if (url.pathname === '/ui.js') return send(200, script, 'text/javascript');
+      if (url.pathname === '/icon.svg') return send(200, icon, 'image/svg+xml');
       if (url.pathname === '/api/status') return send(200, { instances: await status() });
       if (url.pathname === '/api/logs') return send(200, { output: await logs(url.searchParams.get('name'), url.searchParams.get('service')) });
       send(404, { error: 'Not found.' });
