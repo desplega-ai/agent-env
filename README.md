@@ -20,6 +20,17 @@ npm install -g @desplega.ai/agent-env
 
 For a source checkout, run `npm link --ignore-scripts --no-audit --no-fund` in this repository instead.
 
+Install the [agent skill](https://github.com/desplega-ai/agent-env/blob/master/skills/agent-env/SKILL.md) into a project:
+
+```sh
+npx skills add desplega-ai/agent-env --skill agent-env
+```
+
+The skills installer requires Node.js 22.20 or later and lets you choose your coding agents.
+Add `--agent codex` or `--agent claude-code` to select one explicitly.
+Add `-g` for installation across projects. The skill teaches CLI usage and does not install the CLI or Docker.
+It covers local services, Compose, dotenv, SSH, HTTPS, persistent data, and troubleshooting.
+
 ```sh
 cd /path/to/project
 agent-env init
