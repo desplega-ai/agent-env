@@ -158,7 +158,7 @@ export async function loadEnvironment({ cwd, environment = 'default', files = []
   const result = Object.create(null);
   for (const filename of stringList(files, 'env-file')) {
     const fileValues = parseEnvFile(await readFile(resolve(cwd, filename), 'utf8'));
-    sensitiveValues.push(...Object.values(fileValues));
+    sensitiveValues.push(...credentialValues(fileValues));
     Object.assign(result, fileValues);
   }
   const secrets = await readEnvironmentSecrets({ cwd, environment, home });
@@ -182,7 +182,11 @@ export async function loadEnvironment({ cwd, environment = 'default', files = []
 }
 
 export function credentialValues(values = {}) {
-  return Object.entries(values).filter(([key]) => /(?:^|_)(?:PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?|API_KEY|PRIVATE_KEY|ACCESS_KEY)(?:_|$)/i.test(key)).map(([, value]) => value);
+  return Object.entries(values).filter(([key, value]) =>
+    /PASSWORD|PASSWD|(?:^|_)(?:SECRET|TOKEN|PAT|CREDENTIALS?|API_?KEY|PRIVATE_KEY|ACCESS_KEY|AUTHORIZATION|COOKIE)(?:_|$)/i.test(key)
+    || typeof value === 'string' && (/^[a-z][a-z0-9+.-]*:\/\/[^/\s]*:[^/\s]+@/i.test(value)
+      || /^(?:gh[pousr]_|github_pat_|npm_|sk-|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/.test(value)))
+    .map(([, value]) => value);
 }
 
 export function sensitiveValuesForSpec(spec = {}) {

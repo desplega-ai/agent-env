@@ -154,7 +154,11 @@ function storageOptions(message) {
 }
 async function action(message) {
   const { name, type } = message;
-  if (type === 'resume') return action({ type: 'up', spec: structuredClone(instance(name).spec) });
+  if (type === 'resume') {
+    const spec = structuredClone(instance(name).spec);
+    if (message.startupTimeoutSeconds !== undefined) spec.startupTimeoutSeconds = message.startupTimeoutSeconds;
+    return action({ type: 'up', spec });
+  }
   if (type === 'expire') {
     const handle = instance(name);
     if (!handle.spec.cloud?.expiresAt || Date.parse(handle.spec.cloud.expiresAt) > Date.now()) throw new Error('This cloud machine has not expired.');
@@ -169,8 +173,17 @@ async function action(message) {
     if (type === 'restore' && handle) throw new Error('Restore requires a new instance name.');
     if (type === 'restore' && !provider.docker) throw new Error('This provider does not support volume snapshots.');
     let restored;
-    const identitySpec = value => {
+    const identitySpec = (value, omitEnvironment = false) => {
       const copy = structuredClone(value);
+      delete copy.startupTimeoutSeconds;
+      if (omitEnvironment) {
+        delete copy.env; delete copy.envFiles; delete copy.envFile; delete copy.sensitiveValues;
+        for (const service of Object.values(copy.services ?? {})) delete service.env;
+        if (copy.compose) {
+          delete copy.compose.environment;
+          for (const service of Object.values(copy.compose.model?.services ?? {})) delete service.environment;
+        }
+      }
       if (copy.cloud) {
         delete copy.host; delete copy.sshConfig;
         const { idleTimeoutMs, expiresAt, ...identity } = cloudOptions(copy.cloud);
@@ -178,7 +191,9 @@ async function action(message) {
       }
       return copy;
     };
-    if (handle && !handle.removed && !isDeepStrictEqual(identitySpec(handle.spec), identitySpec(spec))) {
+    const changed = handle && !handle.removed && !isDeepStrictEqual(identitySpec(handle.spec), identitySpec(spec));
+    const canRecreate = provider.docker || (spec.provider === 'sandbox' && spec.sandbox?.adapter === 'docker');
+    if (changed && (!canRecreate || !isDeepStrictEqual(identitySpec(handle.spec, true), identitySpec(spec, true)))) {
       throw new Error(`Configuration changed for ${spec.name}. Run agent-env rm ${spec.name}, then up. Volumes remain.`);
     }
     try {
@@ -193,10 +208,19 @@ async function action(message) {
           peer.spec.cloud = { ...spec.cloud };
         }
       }
+      if (changed) {
+        await disconnect(spec.name);
+        await provider.remove(handle, false);
+        handle.removed = true;
+        handle.running = false;
+        handle.spec = spec;
+        await save();
+      }
       if (handle && !handle.removed) {
         // Keep the public listeners while replacing only this instance's tunnels.
         for (const connection of connections.get(spec.name) ?? []) connection.close();
         connections.delete(spec.name);
+        handle.spec = spec;
         await provider.start(handle);
       } else {
         if (type === 'restore') restored = await restoreSnapshot(spec, message.location, provider, storageOptions(message));

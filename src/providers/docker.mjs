@@ -66,9 +66,8 @@ export class DockerProvider {
       throw error;
     }
   }
-  async wait(handle) {
+  async wait(handle, deadline = Date.now() + (handle.spec.startupTimeoutSeconds ?? 60) * 1000) {
     const seconds = handle.spec.startupTimeoutSeconds ?? 60;
-    const deadline = Date.now() + seconds * 1000;
     for (const [name, service] of Object.entries(handle.services)) {
       while (true) {
         const info = JSON.parse(await this.docker(handle.spec, ['inspect', service.container]))[0];

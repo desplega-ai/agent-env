@@ -1,17 +1,15 @@
+import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 import http from 'node:http';
-import { freePort, delay } from '../src/system.mjs';
+import { freePort, delay, createCli, targetOptions } from './helpers.mjs';
 
-const root = resolve(import.meta.dirname, '..');
-const directory = await mkdtemp('/tmp/agent-env-e2e-space ');
+const directory = await mkdtemp(join(tmpdir(), 'agent-env-e2e-space '));
 const state = join(directory, '.agent-env');
 const webPort = await freePort(), dbPort = await freePort();
 const remote = process.env.AGENT_ENV_TEST_SSH;
-const sshConfig = process.env.AGENT_ENV_TEST_SSH_CONFIG;
-const options = [...(remote ? ['--ssh', remote, ...(sshConfig ? ['--ssh-config', sshConfig] : [])] : []), '--no-watch'];
+const options = [...targetOptions(), '--no-watch'];
 const config = {
   services: {
     web: { image: 'busybox:1.37', port: webPort, containerPort: 3000, command: 'httpd -f -p 3000 -h /workspace', volumes: { data: '/data' } },
@@ -21,18 +19,7 @@ const config = {
 await writeFile(join(directory, 'agent-env.json'), JSON.stringify(config));
 await writeFile(join(directory, 'index.html'), 'version-one');
 await writeFile(join(directory, '.env'), 'TEST_SECRET=do-not-sync');
-const invoke = (args, ok = true) => new Promise((resolveResult, reject) => {
-  const child = spawn(process.execPath, [join(root, 'bin/agent-env.mjs'), ...args], { cwd: directory, env: { ...process.env, AGENT_ENV_HOME: state }, stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = '', stderr = '';
-  child.stdout.on('data', data => { stdout += data; });
-  child.stderr.on('data', data => { stderr += data; });
-  child.on('error', reject);
-  child.on('close', code => {
-    if (ok && code !== 0) reject(new Error(`${args.join(' ')}: ${stderr}`));
-    else resolveResult({ code, stdout, stderr });
-  });
-});
-const cli = async args => JSON.parse((await invoke([...args, '--json'])).stdout);
+const { invoke, cli } = createCli(directory, state);
 const get = (host, headers = {}) => new Promise((resolveResult, reject) => {
   http.get({ host: '127.0.0.1', port: webPort, headers: { host: `${host}:${webPort}`, ...headers } }, async response => {
     let body = '';
@@ -103,8 +90,7 @@ try {
   });
   probe.destroy();
   assert.equal(sslResponse.toString(), 'N');
-  const failedExec = await invoke(['exec', 'alpha', '--', 'sh', '-c', 'exit 7'], false);
-  assert.equal(failedExec.code, 7);
+  const failedExec = await invoke(['exec', 'alpha', '--', 'sh', '-c', 'printf failure-stdout; printf failure-stderr >&2; exit 7'], false);
   await cli(['down', 'alpha']);
   await cli(['rm', 'gamma']);
   const retained = await invoke(['fork', 'alpha', 'gamma'], false);
@@ -112,13 +98,30 @@ try {
   assert.match(retained.stderr, /already exists/);
   await cli(['up', '--name', 'gamma', ...options]);
   assert.equal(await sql('gamma', 'SELECT value FROM evidence'), 'fork');
-  const failedConfig = { services: { web: { ...config.services.web, command: 'touch /data/partial; echo deliberate-failure >&2; exit 9' } } };
+  const failedConfig = { services: { web: { ...config.services.web, env: { FAIL_SECRET: 'startup-private-$-literal' }, command: 'touch /data/partial; printf "%s\n" "$FAIL_SECRET"; echo deliberate-failure >&2; exit 9' } } };
   await writeFile(join(directory, 'failed.json'), JSON.stringify(failedConfig));
   const failedStart = await invoke(['up', '--name', 'broken', '--config', 'failed.json', ...options], false);
   assert.notEqual(failedStart.code, 0);
   assert.match(failedStart.stderr, /deliberate-failure/);
+  assert.match(failedStart.stderr, /\[redacted\]/);
+  assert.ok(!failedStart.stderr.includes('startup-private-$-literal'), 'Failed startup disclosed a secret.');
   await cli(['up', '--name', 'broken', ...options]);
   await execute('broken', 'web', ['sh', '-c', 'test ! -e /data/partial']);
+  await execute('broken', 'web', ['sh', '-c', 'printf retained-before-failure > /data/prior']);
+  await cli(['rm', 'broken']);
+  const retainedFailure = await invoke(['up', '--name', 'broken', '--config', 'failed.json', ...options], false);
+  assert.notEqual(retainedFailure.code, 0);
+  await cli(['up', '--name', 'broken', ...options]);
+  assert.equal(await execute('broken', 'web', ['cat', '/data/prior']), 'retained-before-failure');
+  const slowConfig = { startupTimeoutSeconds: 1, services: { web: {
+    ...config.services.web, command: 'touch /data/partial; sleep 5; httpd -f -p 3000 -h /workspace',
+  } } };
+  await writeFile(join(directory, 'slow.json'), JSON.stringify(slowConfig));
+  const slowStart = await invoke(['up', '--name', 'slow', '--config', 'slow.json', ...options], false);
+  assert.notEqual(slowStart.code, 0);
+  assert.match(slowStart.stderr, /ready|timed out|timeout|within 1 seconds/i);
+  await cli(['up', '--name', 'slow', '--timeout', '30', ...options]);
+  await execute('slow', 'web', ['sh', '-c', 'test ! -e /data/partial']);
   const occupied = net.createServer();
   occupied.listen(0, '127.0.0.1');
   await new Promise(resolveResult => occupied.once('listening', resolveResult));
@@ -130,6 +133,9 @@ try {
     assert.match(collision.stderr, /Cannot bind/);
     assert.equal(occupied.listening, true);
   } finally { await new Promise(resolveResult => occupied.close(resolveResult)); }
+  assert.equal(failedExec.code, 7);
+  assert.match(failedExec.stdout + failedExec.stderr, /failure-stdout/);
+  assert.match(failedExec.stdout + failedExec.stderr, /failure-stderr/);
   console.log('PASS: routing, Postgres, persistence, sync, daemon recovery, fork isolation, failed-start cleanup, port conflicts, and exit codes.');
 } finally {
   const cleanup = await invoke(['rm', '--all', '--purge'], false);

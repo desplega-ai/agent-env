@@ -67,9 +67,12 @@ export async function loadSpec(options = {}, command = []) {
   if (names.length > 1) throw new Error('Select one named environment per instance.');
   const environment = names[0] ?? 'default';
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(environment)) throw new Error('Use a valid environment name.');
-  const discoveredFiles = await discoverEnvironmentFiles(cwd, environment);
+  if (options['no-env-file'] && options['env-file']) throw new Error('Select --env-file or --no-env-file, not both.');
+  const envConfig = { ...config, ...config.environments?.[environment] };
+  const configuredFiles = options['env-file'] ?? envConfig.envFiles ?? envConfig.envFile;
+  const selectedFiles = options['no-env-file'] ? [] : stringList(configuredFiles ?? await discoverEnvironmentFiles(cwd, environment), 'env-file').map(file => resolve(cwd, file));
   if (environment !== 'default' && !Object.hasOwn(config.environments ?? {}, environment)
-    && discoveredFiles.some(file => file === resolve(cwd, `.env.${environment}`) || file === resolve(cwd, `.env.${environment}.local`))) {
+    && selectedFiles.some(file => file === resolve(cwd, `.env.${environment}`) || file === resolve(cwd, `.env.${environment}.local`))) {
     config.environments = { ...config.environments, [environment]: {} };
   }
   const environmentName = config.environments?.[environment]?.name;
@@ -98,8 +101,7 @@ export async function loadSpec(options = {}, command = []) {
     spec.cloud = cloudOptions(cloud);
   }
   if (options['ssh-config']) spec.sshConfig = resolve(cwd, options['ssh-config']);
-  if (options['no-env-file'] && options['env-file']) throw new Error('Select --env-file or --no-env-file, not both.');
-  spec.envFiles = options['no-env-file'] ? [] : stringList(options['env-file'] ?? config.envFiles ?? config.envFile ?? discoveredFiles, 'env-file').map(file => resolve(cwd, file));
+  spec.envFiles = selectedFiles;
   // These values remain in memory and private daemon state. Initialization never writes them.
   spec.sensitiveValues = [];
   const { detectComposeFiles, resolveComposeSpec } = await import('./providers/compose.mjs');

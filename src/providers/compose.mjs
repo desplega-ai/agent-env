@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from '
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DockerProvider } from './docker.mjs';
 import { hash, validate } from '../config.mjs';
-import { parseEnvFile, redactEnvironment, sensitiveValuesForSpec } from '../environments.mjs';
+import { credentialValues, redactEnvironment, sensitiveValuesForSpec } from '../environments.mjs';
 import { home } from '../paths.mjs';
 import { quote, run } from '../system.mjs';
 import { shouldSync } from '../source-paths.mjs';
@@ -134,8 +134,13 @@ export async function resolveComposeSpec(spec) {
   const sensitiveValues = [...(spec.sensitiveValues ?? [])];
   for (const file of spec.envFiles ?? []) {
     try {
-      const values = parseEnvFile(await readFile(file, 'utf8'));
-      for (const key of Object.keys(values)) { keys.add(key); sensitiveValues.push(values[key], environment[key]); }
+      const source = await readFile(file, 'utf8');
+      const values = {};
+      for (const line of source.split('\n')) {
+        const key = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:|$)/.exec(line)?.[1];
+        if (key) { keys.add(key); values[key] = environment[key]; }
+      }
+      sensitiveValues.push(...credentialValues(values));
     }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
@@ -143,7 +148,7 @@ export async function resolveComposeSpec(spec) {
     for (const resource of Object.values(model[kind] ?? {})) if (resource.environment) keys.add(resource.environment);
   }
   const captured = Object.fromEntries([...keys].filter(key => Object.hasOwn(environment, key)).map(key => [key, environment[key]]));
-  for (const key of keys) if (!Object.hasOwn(spec.env ?? {}, key) && Object.hasOwn(process.env, key)) sensitiveValues.push(captured[key]);
+  sensitiveValues.push(...credentialValues(captured));
   const unresolved = await parseCompose(spec, ['--no-env-resolution']);
   for (const [name, service] of Object.entries(unresolved.services ?? {})) {
     for (const file of service.env_file ?? []) {
@@ -153,7 +158,7 @@ export async function resolveComposeSpec(spec) {
           const key = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|$)/.exec(line)?.[1];
           if (!key || Object.hasOwn(service.environment ?? {}, key)) continue;
           const value = model.services[name]?.environment?.[key];
-          if (typeof value === 'string') sensitiveValues.push(value.replaceAll('$$', '$'));
+          if (typeof value === 'string') sensitiveValues.push(...credentialValues({ [key]: value.replaceAll('$$', '$') }));
         }
       }
       catch (error) { if (error.code !== 'ENOENT' || file.required !== false) throw new Error('Cannot read a Compose environment file. Check its path and permissions.'); }
@@ -356,8 +361,9 @@ export class ComposeProvider extends DockerProvider {
         }
       }
       attempted = true;
+      const deadline = Date.now() + (spec.startupTimeoutSeconds ?? 60) * 1000;
       await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', String(spec.startupTimeoutSeconds ?? 60)]);
-      await this.wait(handle);
+      await this.wait(handle, deadline);
       return handle;
     } catch (error) {
       if (attempted) await this.compose(handle, ['down', '--remove-orphans']).catch(() => {});
@@ -369,7 +375,7 @@ export class ComposeProvider extends DockerProvider {
       throw error;
     }
   }
-  async wait(handle) {
+  async wait(handle, deadline) {
     const containers = new Map();
     for (const service of Object.values(handle.services)) {
       if (!containers.has(service.composeService)) {
@@ -388,7 +394,7 @@ export class ComposeProvider extends DockerProvider {
       service.hostPort = Number(ports[0].HostPort);
     }
     const routed = Object.fromEntries(Object.entries(handle.services).filter(([, service]) => !service.internal));
-    try { await super.wait({ ...handle, services: routed }); }
+    try { await super.wait({ ...handle, services: routed }, deadline); }
     catch (error) { throw Object.assign(new Error(await this.redact(handle, error.message)), { exitCode: error.exitCode ?? 1 }); }
   }
   connect(handle) {
@@ -396,8 +402,9 @@ export class ComposeProvider extends DockerProvider {
   }
   async start(handle) {
     await this.sync(handle);
+    const deadline = Date.now() + (handle.spec.startupTimeoutSeconds ?? 60) * 1000;
     await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', String(handle.spec.startupTimeoutSeconds ?? 60)]);
-    await this.wait(handle);
+    await this.wait(handle, deadline);
   }
   stop(handle) { return this.compose(handle, ['stop', '-t', '5']); }
   async remove(handle, purge = false) {

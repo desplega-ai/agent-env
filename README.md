@@ -114,6 +114,8 @@ Each Compose service still declares its container variables with `environment` o
 Environment files stay outside remote source synchronization.
 The CLI resolves values locally and sends the required container configuration over SSH.
 Saved instances retain their resolved values. Use `up --name NAME` to load edited files, or `up NAME` to resume saved values.
+For Docker and Compose, environment-only changes recreate containers and retain their named volumes.
+Use `up NAME --timeout 900` to increase the startup timeout of a saved instance.
 
 ```sh
 agent-env env set POSTGRES_PASSWORD --from-env MY_DATABASE_PASSWORD
@@ -124,8 +126,10 @@ agent-env env unset POSTGRES_PASSWORD
 
 Secret commands accept `--env NAME`. Values stay in a private store outside the checkout.
 The CLI prints secret names only.
-Logs and execution output redact private store values, secret references, environment references, and values from environment files.
-Credential names such as `PASSWORD`, `TOKEN`, and `API_KEY` also trigger redaction. Ordinary literal ports, hosts, and database names remain readable.
+Logs and execution output redact private store values, secret references, and explicit environment references.
+Credential names such as `PASSWORD`, `TOKEN`, and `API_KEY` also trigger redaction, including values loaded from dotenv files.
+Credential URLs and common token formats also trigger redaction. Ordinary ports, hosts, modes, and database names remain readable.
+Store secrets with unusual variable names in the private store, or use an explicit secret reference.
 
 ```json
 {
@@ -300,7 +304,8 @@ agent-env daemon stop
 
 `down` retains containers and data. `rm` removes containers and retains volumes. `rm --purge` also removes managed volumes.
 For a removed local instance, recreate it with `up` before purging its retained volumes.
-Configuration changes require `rm`, then `up`.
+Changes to ports, images, commands, mounts, or providers require `rm`, then `up`.
+Environment-only changes use `up --name NAME` and preserve volumes.
 `daemon stop` stops routing, synchronization, and lifecycle timers. Containers remain running.
 The next command restores saved routing and enabled UI/HTTPS listeners.
 

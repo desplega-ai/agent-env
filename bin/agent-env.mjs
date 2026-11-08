@@ -53,7 +53,7 @@ Options:
 Requires Node 22+ and Docker. SSH targets require Docker, rsync, and Bash.
 HTTP supports named hosts and WebSockets. TCP uses the selected instance.
 `;
-function request(message, timeout = Math.max(600000, (message.spec?.startupTimeoutSeconds ?? 0) * 1000 + 120000)) {
+function request(message, timeout = message.type === 'resume' ? 3720000 : Math.max(600000, (message.spec?.startupTimeoutSeconds ?? 0) * 1000 + 120000)) {
   return new Promise((resolve, reject) => {
     const req = http.request({ socketPath, path: '/', method: 'POST', headers: { 'content-type': 'application/json' } }, async response => {
       try {
@@ -190,8 +190,9 @@ async function main() {
   if (type === 'https') message.port = Number(values['https-port'] ?? 8443);
   if (type === 'ui') message.port = Number(values.port ?? 4780);
   if (type === 'up' && name) {
-    if (destination || command.length || Object.keys(values).some(key => !['https', 'https-port', 'json'].includes(key))) throw new Error('Use up NAME without configuration options to resume a saved instance.');
+    if (destination || command.length || Object.keys(values).some(key => !['https', 'https-port', 'json', 'timeout'].includes(key))) throw new Error('Use up NAME without configuration options to resume a saved instance.');
     message.type = 'resume';
+    if (values.timeout !== undefined) message.startupTimeoutSeconds = Number(values.timeout);
   } else if (type === 'up' || type === 'restore') {
     message.spec = await loadSpec(values, command);
     if (values.provider) message.spec.provider = values.provider;
