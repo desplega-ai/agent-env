@@ -7,7 +7,7 @@ license: MIT
 # agent-env
 
 Use the `agent-env` CLI to run development services behind stable localhost addresses.
-These instructions describe CLI version 0.4.0.
+These instructions describe CLI version 0.4.1.
 Check `agent-env --help` when the installed version differs from these instructions.
 Run `agent-env skill` to read this guide and its reference offline.
 Run `agent-env skill install` to install the bundled skill for your coding agent.
@@ -140,6 +140,7 @@ Avoid `--all` when working on one project.
 | Symptom | Next action |
 | --- | --- |
 | Startup timeout | Inspect `logs`. Check the bind address, port, and health check. Increase `--timeout` for slow initialization. |
+| Docker unavailable | Local mode needs Docker. Native SSH mode can run without it locally. Compose still needs a local Docker CLI and plugin. |
 | Old environment values | Run `up --name NAME` from the correct checkout with the intended environment and dotenv options. |
 | Configuration changed | Inspect the change. Use `rm NAME`, then recreate without `--purge` to retain data. |
 | Port conflict | Inspect `list` and the port owner. Change configuration instead of terminating unrelated processes. |

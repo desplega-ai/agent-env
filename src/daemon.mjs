@@ -13,6 +13,7 @@ import { RuntimeExtras, redact } from './runtime.mjs';
 import { prepareCloud, sleepCloud, destroyCloud, commitCloud, disposeFailedCloud, cloudOptions } from './cloud.mjs';
 import { createProxy, createTcpProxy } from './proxy.mjs';
 import { cloudPeers, cloudCanSleep, maintainInstances, expireCloudMachine } from './maintenance.mjs';
+import { checkLocalRuntime } from './prerequisites.mjs';
 
 await mkdir(home, { recursive: true, mode: 0o700 });
 await chmod(home, 0o700);
@@ -169,6 +170,7 @@ async function action(message) {
   if (type === 'up' || type === 'restore') {
     let spec = validate({ ...message.spec, owner });
     const provider = providerFor(spec);
+    await checkLocalRuntime(spec);
     let handle = Object.hasOwn(state.instances, spec.name) ? state.instances[spec.name] : undefined;
     if (type === 'restore' && handle) throw new Error('Restore requires a new instance name.');
     if (type === 'restore' && !provider.docker) throw new Error('This provider does not support volume snapshots.');

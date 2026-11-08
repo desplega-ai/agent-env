@@ -1,9 +1,9 @@
 import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm, utimes } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, rm, stat, symlink, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import http from 'node:http';
-import { freePort, delay, createCli, targetOptions, until } from './helpers.mjs';
+import { freePort, delay, createCli, targetOptions, until, run } from './helpers.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'agent-env-e2e-space '));
 const remote = process.env.AGENT_ENV_TEST_SSH;
@@ -24,7 +24,17 @@ const syncTime = new Date('2020-01-01T00:00:00Z');
 await writeFile(syncFile, 'sync-one');
 await utimes(syncFile, syncTime, syncTime);
 await writeFile(join(directory, '.env'), 'TEST_SECRET=do-not-sync');
-const { invoke, cli } = createCli(directory, state);
+const clientEnv = {};
+if (remote) {
+  const binaries = join(directory, 'client-bin');
+  await mkdir(binaries);
+  await symlink(process.execPath, join(binaries, 'node'));
+  for (const binary of ['ssh', 'rsync']) {
+    await symlink(await run('/bin/sh', ['-c', `command -v ${binary}`]), join(binaries, binary));
+  }
+  clientEnv.PATH = binaries;
+}
+const { invoke, cli } = createCli(directory, state, clientEnv);
 const get = (host, headers = {}) => new Promise((resolveResult, reject) => {
   http.get({ host: '127.0.0.1', port: webPort, headers: { host: `${host}:${webPort}`, ...headers } }, async response => {
     let body = '';
@@ -36,6 +46,16 @@ const execute = async (name, service, command) => JSON.parse((await invoke(['exe
 const sql = (name, query) => execute(name, 'db', ['psql', '-U', 'postgres', '-d', 'app', '-Atc', query]);
 try {
   console.log(`E2E target: ${remote ?? 'local Docker'}`);
+  if (!remote) {
+    const unavailableState = join(directory, 'unavailable-engine');
+    const { invoke: unavailable } = createCli(directory, unavailableState, {
+      DOCKER_HOST: `unix://${join(directory, 'missing-docker.sock')}`, DOCKER_CONTEXT: '',
+    });
+    const result = await unavailable(['up', '--name', 'unavailable', '--local'], false);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /Docker engine is unavailable/);
+    await assert.rejects(stat(unavailableState), { code: 'ENOENT' });
+  }
   if (remote) {
     assert.ok(Buffer.byteLength(state) >= 88, 'Exercise SSH from a long private state path.');
     assert.ok(Buffer.byteLength(join(state, 'control.sock')) < 104, 'Keep the daemon socket within the macOS path limit.');

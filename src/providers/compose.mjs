@@ -6,6 +6,7 @@ import { credentialValues, redactEnvironment, sensitiveValuesForSpec } from '../
 import { home } from '../paths.mjs';
 import { run } from '../system.mjs';
 import { shouldSync } from '../source-paths.mjs';
+import { checkDocker } from '../prerequisites.mjs';
 
 export async function detectComposeFiles(cwd) {
   for (const name of ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml']) {
@@ -128,6 +129,7 @@ export function composeServiceMetadata(model, compose = {}) {
   return services;
 }
 export async function resolveComposeSpec(spec) {
+  await checkDocker({ compose: true });
   const model = await parseCompose(spec);
   const environment = await interpolationEnvironment(spec);
   const keys = new Set([...Object.keys(spec.env ?? {}), ...await interpolationKeys(spec)]);
