@@ -185,10 +185,28 @@ networks:
   await docker(['volume', 'inspect', externalVolume]);
   await docker(['network', 'inspect', externalNetwork]);
   assert.equal(await docker(['run', '--rm', '--mount', `type=volume,src=${externalVolume},dst=/data`, 'busybox:1.37', 'cat', '/data/value']), 'external-survives');
+  await writeFile(join(cwd, 'Dockerfile.slow'), `FROM busybox:1.37\nRUN echo ${token} >/build-marker && sleep 12\n`);
+  await writeFile(join(cwd, 'slow.yaml'), `services:
+  web:
+    build: {context: ., dockerfile: Dockerfile.slow}
+    labels: {agent-env.e2e: "${token}"}
+    command: [sh, -c, "sleep 3; exec httpd -f -p 3000"]
+    ports: ["${port}:3000"]
+`);
+  await up('slow', 'slow.yaml', 'agent-env.json', ['--timeout', '8']);
+  await collectImages();
+  await cli(['rm', 'slow', '--purge']);
+  assert.equal(await docker(['image', 'ls', '-q', '--filter', `reference=agent-env-${owner}-slow-web:agent-env`]), '', 'Purge must remove the owned built image.');
   console.log('PASS: Compose CLI builds, profiles, jobs, health, route aliases, isolated ports/data, secrets, persistence, failure cleanup, and external resource protection.');
 } finally {
   try { await collectImages(); } finally { await test.cleanup(); }
-  for (const image of images) await docker(['image', 'rm', image]);
+  const leakedImages = [];
+  for (const image of images) {
+    if (await docker(['image', 'ls', '-q', '--filter', `reference=${image}`])) {
+      leakedImages.push(image);
+      await docker(['image', 'rm', image]);
+    }
+  }
   if (madeExternalVolume) await docker(['volume', 'rm', externalVolume]);
   if (madeExternalNetwork) await docker(['network', 'rm', externalNetwork]);
   if (owner) {
@@ -199,4 +217,5 @@ networks:
     }
   }
   assert.equal((await containers()).length, 0);
+  assert.deepEqual(leakedImages, [], 'Purge must remove owned Compose images.');
 }

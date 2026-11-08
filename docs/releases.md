@@ -28,6 +28,7 @@ The `CI` job requires all these jobs to succeed:
 The SSH fixture generates new client and host keys for every job.
 The client pins the generated host key and requires strict host verification.
 The fixture starts its own sshd with password authentication disabled.
+PAM handles account checks, which permits key authentication for the runner's password-locked account.
 Its command wrapper isolates the remote workspace.
 The SSH process keeps the real CI user's home.
 It does not change the system SSH configuration or authorized keys.
@@ -98,6 +99,8 @@ It checks these conditions before publishing:
 npm releases cannot include SemVer build metadata because npm does not preserve it.
 
 After npm confirms the exact version and integrity, the job creates `v<VERSION>` and the GitHub release.
+The version check bypasses registry caches and retries propagation for up to twelve attempts, ten seconds apart.
+If publication fails after npm accepted the archive, the retry verifies its integrity before continuing.
 The GitHub release attaches only the tested `.tgz` file.
 Prereleases use npm's `next` tag and GitHub's prerelease flag.
 Stable releases use npm's `latest` tag.
@@ -140,9 +143,11 @@ gh workflow run ci.yml --repo desplega-ai/agent-env --ref master \
 This dispatch still runs every ordinary CI job before it publishes.
 It passes `secrets.NPM_TOKEN` as `NODE_AUTH_TOKEN` only to the release step.
 The release script uses that token only when token publishing is explicitly selected.
-After bootstrap, configure the trusted publisher and leave `use_npm_token` disabled.
+After bootstrap, configure the trusted publisher and dispatch with `use_npm_token` disabled to test OIDC.
+For manual dispatch, this input overrides the repository variable, including an explicit disabled value.
 Remove the token fallback when npm OIDC succeeds.
 If token publishing remains necessary, repository variable `NPM_USE_TOKEN=true` enables it for automatic bumps.
+This repository currently sets that variable for its initial token-based publication.
 The token must permit public publishing under `@desplega.ai`.
 
 To test a version bump before merging:

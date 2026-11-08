@@ -273,6 +273,7 @@ export class ComposeProvider extends DockerProvider {
         service.image = `${project}-${name}:agent-env`;
         service.pull_policy = 'build';
       }
+      if (service.build) service.build.labels = { ...service.build.labels, 'agent-env.owner': spec.owner, 'agent-env.instance': spec.name };
       service.ports = (service.ports ?? []).map(port => ({ target: port.target, protocol: 'tcp', host_ip: '127.0.0.1', published: '0' }));
       if (spec.host) {
         for (const volume of service.volumes ?? []) {
@@ -327,7 +328,9 @@ export class ComposeProvider extends DockerProvider {
     await writeFile(join(directory, 'redactions.json'), JSON.stringify(redactions), { mode: 0o600 });
     // Compose config already escapes interpolation for another Compose invocation.
     await writeFile(localFile, `${JSON.stringify(model, null, 2)}\n`, { mode: 0o600 });
-    return { project, services, localFile, assets, ownedVolumes: Object.values(model.volumes ?? {}).filter(volume => !volume.external).map(volume => volume.name) };
+    return { project, services, localFile, assets,
+      ownedImages: [...new Set(Object.values(model.services).filter(service => service.build).map(service => service.image))],
+      ownedVolumes: Object.values(model.volumes ?? {}).filter(volume => !volume.external).map(volume => volume.name) };
   }
   async create(spec) {
     validate(spec);
@@ -336,6 +339,7 @@ export class ComposeProvider extends DockerProvider {
     const existing = await this.docker(spec, ['ps', '-aq', '--filter', `label=com.docker.compose.project=${this.prefix(spec)}`]);
     if (existing) throw new Error('This Compose project already has containers. Reconnect its existing handle or choose another instance name.');
     const previousVolumes = new Set((await this.docker(spec, ['volume', 'ls', '-q'])).split(/\s+/));
+    const previousImages = new Set((await this.docker(spec, ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'])).split(/\s+/));
     await mkdir(home, { recursive: true, mode: 0o700 });
     const directory = await mkdtemp(join(home, 'compose-'));
     await chmod(directory, 0o700);
@@ -344,7 +348,7 @@ export class ComposeProvider extends DockerProvider {
     try {
       const workspace = spec.host ? `${await this.command(spec, ['pwd'])}/.local/share/agent-env/${spec.owner}/${spec.name}` : spec.cwd;
       const prepared = await this.prepare(spec, workspace, directory);
-      handle = { spec, workspace, project: prepared.project, services: prepared.services, ownedVolumes: prepared.ownedVolumes, runtimeDirectory: directory,
+      handle = { spec, workspace, project: prepared.project, services: prepared.services, ownedVolumes: prepared.ownedVolumes, ownedImages: prepared.ownedImages, runtimeDirectory: directory,
         runtimeFile: spec.host ? join(workspace, '.agent-env', 'compose.json') : prepared.localFile };
       if (spec.host) {
         await this.command(spec, ['mkdir', '-p', workspace]);
@@ -361,14 +365,13 @@ export class ComposeProvider extends DockerProvider {
         }
       }
       attempted = true;
-      const deadline = Date.now() + (spec.startupTimeoutSeconds ?? 60) * 1000;
-      await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', String(spec.startupTimeoutSeconds ?? 60)]);
-      await this.wait(handle, deadline);
+      await this.launch(handle);
       return handle;
     } catch (error) {
       if (attempted) await this.compose(handle, ['down', '--remove-orphans']).catch(() => {});
       if (attempted) {
         for (const volume of handle.ownedVolumes.filter(volume => !previousVolumes.has(volume))) await this.docker(spec, ['volume', 'rm', volume]).catch(() => {});
+        await this.removeImages(handle, handle.ownedImages.filter(image => !previousImages.has(image))).catch(cleanup => { error.message += ` Image cleanup failed: ${cleanup.message}`; });
       }
       if (handle?.spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${spec.owner}/${spec.name}`)) await this.command(spec, ['rm', '-rf', '--', handle.workspace]).catch(() => {});
       await rm(directory, { recursive: true, force: true });
@@ -402,9 +405,23 @@ export class ComposeProvider extends DockerProvider {
   }
   async start(handle) {
     await this.sync(handle);
+    await this.launch(handle);
+  }
+  async launch(handle) {
+    await this.compose(handle, ['create', '--build']);
     const deadline = Date.now() + (handle.spec.startupTimeoutSeconds ?? 60) * 1000;
-    await this.compose(handle, ['up', '-d', '--build', '--wait', '--wait-timeout', String(handle.spec.startupTimeoutSeconds ?? 60)]);
+    await this.compose(handle, ['up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', String(handle.spec.startupTimeoutSeconds ?? 60)]);
     await this.wait(handle, deadline);
+  }
+  async removeImages(handle, images = handle.ownedImages ?? []) {
+    for (const name of images) {
+      if (!name.startsWith(`${this.prefix(handle.spec)}-`) || !name.endsWith(':agent-env')) throw new Error('Refusing to remove an image outside this instance.');
+      const found = await this.docker(handle.spec, ['image', 'ls', '--filter', `reference=${name}`, '--format', '{{.Repository}}:{{.Tag}}']);
+      if (!found.split(/\s+/).includes(name)) continue;
+      const [image] = JSON.parse(await this.docker(handle.spec, ['image', 'inspect', name]));
+      if (image.Config?.Labels?.['agent-env.owner'] !== handle.spec.owner || image.Config?.Labels?.['agent-env.instance'] !== handle.spec.name) throw new Error('Refusing to remove an image with different ownership labels.');
+      await this.docker(handle.spec, ['image', 'rm', name]);
+    }
   }
   stop(handle) { return this.compose(handle, ['stop', '-t', '5']); }
   async remove(handle, purge = false) {
@@ -420,9 +437,11 @@ export class ComposeProvider extends DockerProvider {
         volumes.push(name);
       }
       if (volumes.length) await this.docker(handle.spec, ['volume', 'rm', ...volumes]);
+      await this.removeImages(handle);
       return;
     }
     await this.compose(handle, ['down', '--remove-orphans', ...(purge ? ['--volumes'] : [])]);
+    if (purge) await this.removeImages(handle);
     await rm(handle.runtimeDirectory, { recursive: true, force: true });
     if (handle.spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${handle.spec.owner}/${handle.spec.name}`)) await this.command(handle.spec, ['rm', '-rf', '--', handle.workspace]);
   }

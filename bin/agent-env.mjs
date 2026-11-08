@@ -53,7 +53,7 @@ Options:
 Requires Node 22+ and Docker. SSH targets require Docker, rsync, and Bash.
 HTTP supports named hosts and WebSockets. TCP uses the selected instance.
 `;
-function request(message, timeout = message.type === 'resume' ? 3720000 : Math.max(600000, (message.spec?.startupTimeoutSeconds ?? 0) * 1000 + 120000)) {
+function request(message, timeout = message.type === 'resume' ? (message.startupTimeoutSeconds ?? 3600) * 1000 + 120000 : Math.max(600000, (message.spec?.startupTimeoutSeconds ?? 0) * 1000 + 120000)) {
   return new Promise((resolve, reject) => {
     const req = http.request({ socketPath, path: '/', method: 'POST', headers: { 'content-type': 'application/json' } }, async response => {
       try {

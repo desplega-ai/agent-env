@@ -40,7 +40,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 PermitRootLogin no
-UsePAM no
+UsePAM yes
 StrictModes yes
 AllowTcpForwarding local
 GatewayPorts no

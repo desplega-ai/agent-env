@@ -8,6 +8,8 @@ const test = await fixture('dotenv', { AGENT_ENV_E2E_STORE_INPUT: 'dotenv-store-
 const { cwd, directory, cli, invoke } = test;
 const port = await freePort();
 const literal = '$(touch parser-executed) `touch parser-executed-backtick` $NO_EXPANSION';
+const credentials = { ENCRYPTION_KEY: 'encryption-fixture', SIGNING_KEY: 'signing-fixture', LICENSE_KEY: 'license-fixture', SESSION_SALT: 'salt-fixture', OPAQUE_STRIPE: 'sk_live_fixture', OPAQUE_SLACK: 'xoxb-fixture', OPAQUE_GITLAB: 'glpat-fixture', OPAQUE_AWS: 'AKIAABCDEFGHIJKLMNOP' };
+const credentialFile = Object.entries(credentials).map(([key, value]) => `${key}=${value}\n`).join('');
 const digest = value => createHash('sha256').update(value).digest('hex');
 const config = {
   env: { TOP: 'top-config', SERVICE: 'top-config', TOP_REF: { env: 'AGENT_ENV_E2E_STORE_INPUT' } },
@@ -34,7 +36,7 @@ try {
   await writeFile(join(cwd, '.env'), `BASE=base-only\nLOCAL=base\nNAMED=base\nFINAL=base\nSTORE=file\nMULTI='first\nsecond'\nQUOTED="quoted value" # comment\nEMPTY=\nTOP=file\nSERVICE=file\nLITERAL='${literal}'\n`);
   await writeFile(join(cwd, '.env.local'), 'LOCAL=local-only\nNAMED=local\nFINAL=local\n');
   await writeFile(join(cwd, '.env.review'), 'NAMED=named-only\nFINAL=named\n');
-  await writeFile(join(cwd, '.env.review.local'), 'FINAL=named-local-only\nDEBUG=1\nAPP_MODE=development\nDB_PASSWORD=short-secret\n');
+  await writeFile(join(cwd, '.env.review.local'), 'FINAL=named-local-only\nDEBUG=1\nAPP_MODE=development\nDB_PASSWORD=short-secret\n' + credentialFile);
   await cli(['env', 'set', 'STORE', '--env', 'review', '--from-env', 'AGENT_ENV_E2E_STORE_INPUT']);
   await cli(['env', 'set', 'TOP', '--env', 'review'], { input: 'private-top-store\n' });
   await cli(['env', 'set', 'SERVICE', '--env', 'review'], { input: 'private-service-store\n' });
@@ -49,6 +51,7 @@ try {
   assert.match((await cli(['logs', 'auto'])).output, /started 1 worker in development mode, build 2021/);
   assert.equal((await cli(['exec', 'auto', '--', 'echo', '1 + 1 = 2'])).output, '1 + 1 = 2');
   assert.equal((await cli(['exec', 'auto', '--', 'printenv', 'DB_PASSWORD'])).output, '[redacted]');
+  for (const key of Object.keys(credentials)) assert.equal((await cli(['exec', 'auto', '--', 'printenv', key])).output, '[redacted]', `Redact ${key}.`);
   const failed = await invoke(['exec', 'auto', '--', 'sh', '-c', 'printf "port 5173: %s" "$STORE"; printf " stderr: %s" "$TOP_REF" >&2; exit 7'], false);
   assert.equal(await readFile(join(cwd, 'agent-env.json'), 'utf8'), before);
 
@@ -59,6 +62,7 @@ try {
   assert.equal((await cli(['exec', 'auto', '--', 'cat', '/data/value'])).output, 'durable');
   await cli(['down', 'auto']);
   await cli(['up', 'auto', '--timeout', '121']);
+  assert.equal(JSON.parse(await readFile(join(test.home, 'state.json'), 'utf8')).instances.auto.spec.startupTimeoutSeconds, 121);
   await expected('auto', { DEBUG: '0' });
   assert.equal((await cli(['exec', 'auto', '--', 'cat', '/data/value'])).output, 'durable');
 
@@ -83,6 +87,9 @@ try {
   await writeFile(join(cwd, 'configured.json'), JSON.stringify({ ...config, envFiles: ['explicit.env'] }));
   await start('config-file', ['--config', 'configured.json']);
   await expected('config-file', { BASE: '', EXPLICIT: 'first', FINAL: 'explicit-first' });
+  await writeFile(join(cwd, 'overlay-file.json'), JSON.stringify({ ...config, envFiles: ['explicit.env'], environments: { review: { envFile: 'second.env' } } }));
+  await start('overlay-file', ['--config', 'overlay-file.json', '--env', 'review']);
+  await expected('overlay-file', { EXPLICIT: '', FINAL: 'explicit-second' });
   const missing = await invoke(['up', '--name', 'missing', '--env-file', 'absent.env'], false);
   assert.notEqual(missing.code, 0);
   assert.match(missing.stderr, /ENOENT|absent.env/);

@@ -31,7 +31,7 @@ export async function addService(kind, options = {}) {
     port, containerPort: postgres ? 5432 : 6379, protocol: 'tcp',
     health: postgres ? 'pg_isready -h 127.0.0.1 -U postgres' : 'redis-cli ping',
     volumes: { data: postgres ? '/var/lib/postgresql/data' : '/data' },
-    ...(postgres ? { env: { POSTGRES_DB: 'app', POSTGRES_PASSWORD: { secret: 'POSTGRES_PASSWORD' } } } : { command: 'redis-server --appendonly yes' }),
+    ...(postgres ? { env: { POSTGRES_DB: 'app', POSTGRES_PASSWORD: { secret: 'POSTGRES_PASSWORD' } } } : { command: 'redis-server --dir /data --appendonly yes' }),
   };
   if (config.provider === 'compose' || config.compose) {
     const current = await loadSpec({ cwd, config: existing ? options.config : undefined, env: existingEnvironment ? environment : undefined });
@@ -48,7 +48,7 @@ export async function addService(kind, options = {}) {
       volumes: [`${kind}-data:${service.volumes.data}`],
       healthcheck: { test: ['CMD-SHELL', service.health], interval: '2s', timeout: '2s', retries: 30 },
       ...(postgres ? { environment: { POSTGRES_DB: 'app', POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD with agent-env env set}' } }
-        : { command: ['redis-server', '--appendonly', 'yes'] }),
+        : { command: ['redis-server', '--dir', '/data', '--appendonly', 'yes'] }),
     };
     model.volumes[`${kind}-data`] = {};
     target.provider = 'compose';

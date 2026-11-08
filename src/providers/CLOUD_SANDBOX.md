@@ -228,14 +228,13 @@ export function createAdapter() {
 ```sh
 node --check src/cloud.mjs
 node --check src/providers/sandbox.mjs
-node --test test/cloud.test.mjs test/sandbox.test.mjs
-npm test
 npm run check
+AGENT_ENV_TEST_SANDBOX=1 node test/run.mjs docker
+# Requires an explicitly selected Hetzner test project and creates billed resources:
+AGENT_ENV_TEST_CLOUD=1 node test/run.mjs cloud
 ```
 
-Cloud tests use an injected stateful CLI runner and real local SSH key generation.
-They never call the live Hetzner API.
-Sandbox tests import a local ESM module and test the real Docker provider with a simulated Docker CLI runner.
-They use a real loopback listener for service readiness.
-They allocate no live containers or cloud infrastructure.
-Live provisioning and the registered Docker sandbox bridge passed integration tests. See VERIFICATION.md.
+Set `AGENT_ENV_CLI` to the absolute path of an installed package executable.
+The sandbox suite exercises the public CLI against the real Docker bridge.
+The cloud suite exercises the public CLI against real Hetzner infrastructure and removes its owned resources.
+Ordinary CI does not run the cloud suite. See [CI and releases](../../docs/releases.md).

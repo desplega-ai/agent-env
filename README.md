@@ -30,6 +30,7 @@ agent-env ui
 `init` detects Compose files, package scripts, package managers, and common framework ports.
 It never replaces an existing configuration or edits package scripts.
 For a first dependency installation, use `agent-env up --timeout 900` or set `startupTimeoutSeconds` in `agent-env.json`.
+Compose builds and image downloads finish before its shared readiness timeout begins.
 For an unknown project, supply a command:
 
 ```sh
@@ -302,7 +303,9 @@ agent-env rm app --purge
 agent-env daemon stop
 ```
 
-`down` retains containers and data. `rm` removes containers and retains volumes. `rm --purge` also removes managed volumes.
+`down` retains containers and data. `rm` removes containers and retains volumes and built images.
+`rm --purge` also removes managed volumes and the instance's owned Compose image tags.
+Shared base images and Docker build caches remain available.
 For a removed local instance, recreate it with `up` before purging its retained volumes.
 Changes to ports, images, commands, mounts, or providers require `rm`, then `up`.
 Environment-only changes use `up --name NAME` and preserve volumes.

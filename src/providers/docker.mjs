@@ -22,7 +22,10 @@ export class DockerProvider {
       ? run('ssh', [...this.sshArgs(spec), '--', spec.host, args.map(quote).join(' ')], options)
       : run(args[0], args.slice(1), options);
   }
-  docker(spec, args, options) { return this.command(spec, ['docker', ...args], options); }
+  docker(spec, args, options = {}) {
+    const inspect = args[0] === 'inspect' || ['container', 'image', 'volume', 'network'].includes(args[0]) && args[1] === 'inspect';
+    return this.command(spec, ['docker', ...args], { ...options, ...(inspect ? { errorStdout: false } : {}) });
+  }
   prefix(spec) { return `agent-env-${spec.owner}-${spec.name}`; }
   volume(spec, service, name) { return `${this.prefix(spec)}-${service}-${name}`; }
   async sync(handle) {

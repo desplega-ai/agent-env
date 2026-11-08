@@ -201,18 +201,18 @@ That new worktree normally contains the copied source changes and therefore coun
 ```sh
 node --check src/snapshots.mjs
 node --check src/worktrees.mjs
-node --test test/snapshots.test.mjs test/worktrees.test.mjs
-npm test
 npm run check
+node test/run.mjs features
+AGENT_ENV_TEST_SSH=my-test-host node test/run.mjs ssh
+AGENT_ENV_TEST_S3=s3://test-bucket/prefix node test/run.mjs s3
 ```
 
-Docker tests require a running Docker host and an existing `busybox:1.37` image.
-They skip with a reason when those prerequisites are absent.
-They do not download an image.
+Set `AGENT_ENV_CLI` to the absolute path of an installed package executable.
+Docker tests require a running Docker host and can download public images.
 Tests use owned temporary containers, volumes, directories, and Git repositories.
-They check binary restoration, source isolation, Compose volume discovery, archive attacks, cleanup, conflicts, and credential exclusions.
-S3 tests use a precise fake AWS CLI contract, including conditional writes and manifest publication order.
-SSH tests use a local fake SSH executable with the real Docker command helper and binary file descriptors.
+They check restoration, source isolation, Compose volumes, archive checksums, cleanup, conflicts, and credential exclusions through the public CLI.
+S3 tests use a real S3 service. CI provides a disposable SeaweedFS fixture.
+SSH tests use a real server. CI provides a disposable local SSH fixture.
 
 Live integration passed against a temporary SeaweedFS S3 server. Verify each production storage service separately.
 Test export and restore against a temporary bucket or a local S3-compatible server.

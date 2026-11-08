@@ -68,8 +68,8 @@ export async function loadSpec(options = {}, command = []) {
   const environment = names[0] ?? 'default';
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(environment)) throw new Error('Use a valid environment name.');
   if (options['no-env-file'] && options['env-file']) throw new Error('Select --env-file or --no-env-file, not both.');
-  const envConfig = { ...config, ...config.environments?.[environment] };
-  const configuredFiles = options['env-file'] ?? envConfig.envFiles ?? envConfig.envFile;
+  const envConfig = config.environments?.[environment] ?? {};
+  const configuredFiles = options['env-file'] ?? envConfig.envFiles ?? envConfig.envFile ?? config.envFiles ?? config.envFile;
   const selectedFiles = options['no-env-file'] ? [] : stringList(configuredFiles ?? await discoverEnvironmentFiles(cwd, environment), 'env-file').map(file => resolve(cwd, file));
   if (environment !== 'default' && !Object.hasOwn(config.environments ?? {}, environment)
     && selectedFiles.some(file => file === resolve(cwd, `.env.${environment}`) || file === resolve(cwd, `.env.${environment}.local`))) {

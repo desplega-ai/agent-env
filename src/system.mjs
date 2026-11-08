@@ -14,7 +14,8 @@ export function run(command, args, options = {}) {
     child.on('error', reject);
     child.on('close', code => {
       if (code === 0) return resolve(stdout.trimEnd());
-      const output = options.combined ? stdout.trimEnd() : [stdout.trimEnd(), stderr.trimEnd()].filter(Boolean).join('\n');
+      const output = options.errorStdout === false ? stderr.trimEnd()
+        : options.combined ? stdout.trimEnd() : [stdout.trimEnd(), stderr.trimEnd()].filter(Boolean).join('\n');
       reject(Object.assign(new Error(`${command} failed (${code}): ${output}`), { exitCode: code ?? 1 }));
     });
   });

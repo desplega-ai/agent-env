@@ -42,8 +42,13 @@ if [[ -f "$work/ssh/sshd.pid" ]]; then
   fi
 fi
 if [[ "$status" == 0 ]]; then
-  rm -rf "$work"
-else
+  if ! rm -rf "$work"; then
+    status=1
+    # A partial removal must retain the marker for a later cleanup attempt.
+    if [[ -d "$work" ]]; then printf 'agent-env-ci\n' > "$work/.agent-env-ci-owned"; fi
+  fi
+fi
+if [[ "$status" != 0 ]]; then
   echo "Cleanup failed. Recovery files remain at $work." >&2
 fi
 exit "$status"

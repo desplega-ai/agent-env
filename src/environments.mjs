@@ -183,9 +183,9 @@ export async function loadEnvironment({ cwd, environment = 'default', files = []
 
 export function credentialValues(values = {}) {
   return Object.entries(values).filter(([key, value]) =>
-    /PASSWORD|PASSWD|(?:^|_)(?:SECRET|TOKEN|PAT|CREDENTIALS?|API_?KEY|PRIVATE_KEY|ACCESS_KEY|AUTHORIZATION|COOKIE)(?:_|$)/i.test(key)
+    /PASSWORD|PASSWD|(?:^|_)(?:SECRET|TOKEN|PAT|CREDENTIALS?|KEY|SALT|APIKEY|AUTHORIZATION|COOKIE)(?:_|$)/i.test(key)
     || typeof value === 'string' && (/^[a-z][a-z0-9+.-]*:\/\/[^/\s]*:[^/\s]+@/i.test(value)
-      || /^(?:gh[pousr]_|github_pat_|npm_|sk-|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/.test(value)))
+      || /^(?:gh[pousr]_|github_pat_|npm_|sk[-_]|xox[baprs]-|AKIA[A-Z0-9]{16}|glpat-|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/.test(value)))
     .map(([, value]) => value);
 }
 

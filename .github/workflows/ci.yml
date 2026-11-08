@@ -68,7 +68,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, macos-15]
         node: ['22', 'lts/*']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -182,7 +182,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          USE_NPM_TOKEN: ${{ inputs.use_npm_token || vars.NPM_USE_TOKEN || 'false' }}
+          USE_NPM_TOKEN: ${{ github.event_name == 'workflow_dispatch' && (inputs.use_npm_token && 'true' || 'false') || vars.NPM_USE_TOKEN || 'false' }}
           RELEASE_VERSION: ${{ needs.package.outputs.version }}
           TARBALL: ${{ needs.package.outputs.tarball }}
         run: node scripts/release.mjs "$RUNNER_TEMP/agent-env-artifact/$TARBALL"

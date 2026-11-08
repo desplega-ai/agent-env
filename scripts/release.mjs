@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { compareVersions, parseVersion } from './release-version.mjs';
 
 const run = (command, args, options = {}) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], ...options }).trim();
@@ -23,10 +24,26 @@ const integrity = bytes => `sha512-${createHash('sha512').update(bytes).digest('
 const expectedIntegrity = integrity(readFileSync(tarball));
 const tag = `v${version}`, repo = process.env.GITHUB_REPOSITORY;
 const registry = `https://registry.npmjs.org/${encodeURIComponent(name)}`;
+async function publishedVersion(attempts = 1) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const checked = await fetch(`${registry}/${encodeURIComponent(version)}?verification=${Date.now()}`, {
+      headers: { 'cache-control': 'no-cache' }, signal: AbortSignal.timeout(30000),
+    });
+    if (checked.ok) {
+      const confirmed = await checked.json();
+      assert.equal(confirmed.version, version);
+      assert.equal(confirmed.dist?.integrity, expectedIntegrity, 'This npm version contains a different tarball.');
+      return confirmed;
+    }
+    assert.ok(checked.status === 404 || checked.status === 429 || checked.status >= 500, `The npm version check returned ${checked.status}.`);
+    if (attempt + 1 < attempts) await delay(10000);
+  }
+  return undefined;
+}
 const response = await fetch(registry, { signal: AbortSignal.timeout(30000) });
 assert.ok(response.ok || response.status === 404, `The npm registry returned ${response.status}.`);
 const metadata = response.status === 404 ? { versions: {} } : await response.json();
-const published = metadata.versions?.[version];
+const published = await publishedVersion() ?? metadata.versions?.[version];
 if (published) {
   assert.equal(published.version, version);
   assert.equal(published.dist?.integrity, expectedIntegrity, 'This npm version contains a different tarball.');
@@ -64,13 +81,14 @@ try {
       assert.ok(env.NODE_AUTH_TOKEN, 'Token publishing requires the NPM_TOKEN secret.');
       writeFileSync(env.NPM_CONFIG_USERCONFIG, '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n', { mode: 0o600 });
     } else delete env.NODE_AUTH_TOKEN;
-    run('npm', ['publish', tarball, '--registry=https://registry.npmjs.org', '--access=public', '--provenance', '--ignore-scripts', '--tag', parsed.pre ? 'next' : 'latest'], { env, stdio: 'inherit' });
+    try {
+      run('npm', ['publish', tarball, '--registry=https://registry.npmjs.org', '--access=public', '--provenance', '--ignore-scripts', '--tag', parsed.pre ? 'next' : 'latest'], { env, stdio: 'inherit' });
+    } catch (error) {
+      // A lost response or stale registry cache can hide a completed publication.
+      if (!await publishedVersion(12)) throw error;
+    }
   }
-  const checked = await fetch(`${registry}/${encodeURIComponent(version)}`, { signal: AbortSignal.timeout(30000) });
-  assert.ok(checked.ok, `The npm version check returned ${checked.status}. Retry the workflow after registry propagation.`);
-  const confirmed = await checked.json();
-  assert.equal(confirmed.version, version);
-  assert.equal(confirmed.dist?.integrity, expectedIntegrity);
+  assert.ok(await publishedVersion(12), 'The npm registry did not confirm the published archive. Retry this workflow after propagation.');
   if (!remoteTag) {
     run('git', ['tag', tag, process.env.GITHUB_SHA]);
     run('git', ['push', 'origin', `refs/tags/${tag}`]);
