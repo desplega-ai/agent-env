@@ -12,6 +12,7 @@ import { providerFor, disposeProviders } from './providers/index.mjs';
 import { RuntimeExtras, redact } from './runtime.mjs';
 import { prepareCloud, sleepCloud, destroyCloud, commitCloud, disposeFailedCloud } from './cloud.mjs';
 import { createProxy, createTcpProxy } from './proxy.mjs';
+import { cloudPeers, cloudCanSleep, maintainInstances } from './maintenance.mjs';
 
 await mkdir(home, { recursive: true, mode: 0o700 });
 await chmod(home, 0o700);
@@ -142,8 +143,8 @@ async function wakeForStorage(handle) {
 }
 async function sleepUnusedCloud(handle) {
   const cloud = handle.spec.cloud;
-  const peers = Object.values(state.instances).filter(peer => cloud && peer.spec.cloud?.recordId === cloud.recordId);
-  if (!cloud || peers.some(peer => peer.running)) return;
+  const peers = cloudPeers(handle, state.instances);
+  if (!cloudCanSleep(handle, state.instances) || handle.running) return;
   await sleepCloud(handle);
   for (const peer of peers) peer.sleeping = true;
   await save();
@@ -153,6 +154,7 @@ function storageOptions(message) {
 }
 async function action(message) {
   const { name, type } = message;
+  if (type === 'resume') return action({ type: 'up', spec: structuredClone(instance(name).spec) });
   if (type === 'up' || type === 'restore') {
     let spec = validate({ ...message.spec, owner });
     const provider = providerFor(spec);
@@ -262,7 +264,7 @@ async function action(message) {
           else await provider.stop(handle);
         }
         await disconnect(handle.spec.name);
-        if (cloud && !peers().some(peer => peer.running)) {
+        if (cloudCanSleep(handle, state.instances)) {
           await sleepCloud(handle);
           for (const peer of [handle, ...peers()]) peer.sleeping = true;
         }
@@ -423,38 +425,15 @@ let maintaining = false;
 const maintenance = setInterval(() => {
   if (shuttingDown || maintaining) return;
   maintaining = true;
-  enqueue(async () => {
-    const now = Date.now();
-    for (const handle of Object.values(state.instances)) {
-      const name = handle.spec.name;
-      const cloud = handle.spec.cloud;
-      if (cloud?.expiresAt && Date.parse(cloud.expiresAt) <= now) {
-        try { await action({ type: 'rm', name, purge: true }); } catch (error) { errors.set(name, error.message); }
-        continue;
-      }
-      if (!handle.running) continue;
-      const peers = Object.values(state.instances).filter(peer => cloud && peer.spec.cloud?.recordId === cloud.recordId);
-      const lastActivity = Math.max(handle.lastActivity ?? now, ...peers.map(peer => peer.lastActivity ?? now));
-      if (cloud?.idleTimeoutMs && now - lastActivity > cloud.idleTimeoutMs) {
-        try { await action({ type: 'down', name }); } catch (error) { errors.set(name, error.message); }
-        continue;
-      }
-      if (!handle.spec.host || summary(handle).connected) continue;
-      const retry = retries.get(name) ?? { next: 0, count: 0 };
-      if (now < retry.next) continue;
-      try {
-        for (const connection of connections.get(name) ?? []) connection.close();
-        connections.delete(name);
-        await providerFor(handle.spec).wait(handle);
-        await connect(handle);
-        await save();
-      } catch (error) {
-        retry.count++;
-        retry.next = Date.now() + Math.min(60000, 1000 * 2 ** Math.min(retry.count, 6));
-        retries.set(name, retry);
-        errors.set(name, redact(handle, `Reconnecting: ${error.message}`));
-      }
-    }
-  }).catch(error => console.error(error.message)).finally(() => { maintaining = false; });
+  enqueue(() => maintainInstances({
+    instances: state.instances, action, retries, errors, connected: handle => summary(handle).connected,
+    reconnect: async handle => {
+      for (const connection of connections.get(handle.spec.name) ?? []) connection.close();
+      connections.delete(handle.spec.name);
+      await providerFor(handle.spec).wait(handle);
+      await connect(handle);
+      await save();
+    },
+  })).catch(error => console.error(error.message)).finally(() => { maintaining = false; });
 }, 2000);
 maintenance.unref();

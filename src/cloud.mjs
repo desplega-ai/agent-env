@@ -11,9 +11,9 @@ const fields = { server: 'serverId', 'primary-ip': 'primaryIpId', 'ssh-key': 'ke
 const safeName = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/.test(value);
 const sshQuote = value => `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 
-export function cloudOptions(value = {}) {
+export function cloudOptions(value) {
   const options = typeof value === 'string' ? { provider: value } : value;
-  if (!options || (options.provider && options.provider !== 'hetzner')) throw new Error('Cloud provider must be hetzner.');
+  if (!options || options.provider !== 'hetzner') throw new Error('Select the cloud provider explicitly: hetzner.');
   const result = { type: 'cx23', location: 'fsn1', image: 'ubuntu-24.04', idleTimeoutMs: 30 * 60 * 1000, ...options, provider: 'hetzner' };
   for (const field of ['type', 'location', 'image']) {
     if (typeof result[field] !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(result[field])) throw new Error(`Cloud ${field} must be a resource name or numeric ID.`);

@@ -28,7 +28,20 @@ function aws(options, args) {
 
 async function allContainers(provider, spec) {
   const ids = (await provider.docker(spec, ['container', 'ls', '-aq'])).split(/\s+/).filter(Boolean);
-  return ids.length ? JSON.parse(await provider.docker(spec, ['inspect', ...ids])) : [];
+  if (!ids.length) return [];
+  try { return JSON.parse(await provider.docker(spec, ['inspect', ...ids])); }
+  catch {
+    const containers = [];
+    for (const id of ids) {
+      try { containers.push(...JSON.parse(await provider.docker(spec, ['inspect', id]))); }
+      catch (error) {
+        // An unrelated temporary container can disappear between listing and inspection.
+        const remaining = await provider.docker(spec, ['container', 'ls', '-aq', '--filter', `id=${id}`]);
+        if (remaining.trim()) throw error;
+      }
+    }
+    return containers;
+  }
 }
 
 function serviceContainers(service) {

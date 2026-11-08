@@ -18,6 +18,7 @@ const help = `dev-now: development services with stable localhost addresses
   dev-now init                       Create dev-now.json
   dev-now add postgres | redis       Add a persistent service
   dev-now up [--ssh user@host]        Start the configured stack
+  dev-now up NAME                    Resume the saved instance from any directory
   dev-now up --name demo --port 3000 -- node server.js
   dev-now list                       Show services and addresses
   dev-now ui                         Open the local status dashboard
@@ -31,15 +32,22 @@ const help = `dev-now: development services with stable localhost addresses
   dev-now env list | unset KEY       Manage secret names for --env NAME
   dev-now snapshot NAME LOCATION     Save stopped volumes locally or to S3
   dev-now restore LOCATION --name NAME  Restore into a new instance
-  dev-now fork SOURCE DEST --worktree PATH  Fork source files and data
   dev-now down NAME | --all          Stop containers and retain data
-  dev-now fork SOURCE DESTINATION    Copy stopped volumes and start a fork
+  dev-now fork SOURCE DEST [--worktree PATH]  Fork stopped data and optional source files
   dev-now rm NAME [--purge]          Remove containers, optionally data
   dev-now daemon stop               Stop routing and retain containers
 
-Options: --name NAME, --port PORT, --image IMAGE, --ssh HOST,
-         --ssh-config FILE, --local, --config FILE, --service NAME, --json
-         --cloud hetzner, --env NAME, --https, --https-port PORT, --no-watch
+Options:
+  --name NAME, --port PORT, --image IMAGE, --config FILE, --service NAME, --json
+  --ssh HOST, --ssh-config FILE, --local, --provider NAME, --adapter FILE
+  --cloud hetzner, --cloud-type TYPE, --location LOCATION
+  --idle-minutes MINUTES, --ttl-hours HOURS (require a cloud target)
+  --env NAME, --env-file FILE, --from-env VARIABLE
+  --compose-file FILE, --profile NAME (repeat for multiple files or profiles)
+  --https, --https-port PORT, --no-watch
+  --worktree PATH, --branch BRANCH, --ref REF
+  --endpoint URL, --omit-mounts, --all, --purge
+  --remove-worktree, --discard-worktree (requires --remove-worktree)
 
 Requires Node 22+ and Docker. SSH targets require Docker, rsync, and Bash.
 HTTP supports named hosts and WebSockets. TCP uses the selected instance.
@@ -173,17 +181,13 @@ async function main() {
   }
   if (type === 'https') message.port = Number(values['https-port'] ?? 8443);
   if (type === 'ui') message.port = Number(values.port ?? 4780);
-  if (type === 'up' || type === 'restore') {
+  if (type === 'up' && name) {
+    if (destination || command.length || Object.keys(values).some(key => !['https', 'https-port', 'json'].includes(key))) throw new Error('Use up NAME without configuration options to resume a saved instance.');
+    message.type = 'resume';
+  } else if (type === 'up' || type === 'restore') {
     message.spec = await loadSpec(values, command);
     if (values.provider) message.spec.provider = values.provider;
     if (values.adapter) message.spec.sandbox = { ...message.spec.sandbox, adapter: values.adapter };
-    if (values.cloud) message.spec.cloud = { provider: values.cloud, ...(values['cloud-type'] ? { type: values['cloud-type'] } : {}), ...(values.location ? { location: values.location } : {}) };
-    if (values['idle-minutes'] !== undefined) message.spec.cloud = { ...message.spec.cloud, idleTimeoutMs: Number(values['idle-minutes']) * 60000 };
-    if (values['ttl-hours'] !== undefined) {
-      const hours = Number(values['ttl-hours']);
-      if (!Number.isFinite(hours) || hours <= 0) throw new Error('TTL hours must be a positive number.');
-      message.spec.cloud = { ...message.spec.cloud, expiresAt: new Date(Date.now() + hours * 3600000).toISOString() };
-    }
     if (values['no-watch']) message.spec.watch = false;
   }
   await ensureDaemon();

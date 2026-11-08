@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from '
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DockerProvider } from './docker.mjs';
 import { hash, validate } from '../config.mjs';
-import { parseEnvFile, redactEnvironment } from '../environments.mjs';
+import { parseEnvFile, redactEnvironment, sensitiveValuesForSpec } from '../environments.mjs';
 import { home } from '../paths.mjs';
 import { quote, run } from '../system.mjs';
 
@@ -32,10 +32,10 @@ function composeEnvironment(spec) {
   // The caller selects files and profiles. Ambient Compose options must not change that selection.
   return { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COMPOSE_'))), ...spec.env };
 }
-async function parseCompose(spec) {
+async function parseCompose(spec, options = []) {
   if (!spec.compose.files.length) throw new Error('No Compose file exists. Specify --compose-file FILE.');
   try {
-    return JSON.parse(await run('docker', [...sourceArgs(spec), '--profile', '*', 'config', '--format', 'json'], { env: composeEnvironment(spec) }));
+    return JSON.parse(await run('docker', [...sourceArgs(spec), '--profile', '*', 'config', '--format', 'json', ...options], { env: composeEnvironment(spec) }));
   } catch {
     // Compose diagnostics can contain expanded secrets. Never copy them into daemon logs.
     throw new Error('Cannot normalize Compose configuration. Check Docker Compose, source files, profiles, and required environment variables.');
@@ -130,16 +130,40 @@ export async function resolveComposeSpec(spec) {
   const model = await parseCompose(spec);
   const environment = await interpolationEnvironment(spec);
   const keys = new Set([...Object.keys(spec.env ?? {}), ...await interpolationKeys(spec)]);
+  const sensitiveValues = [...(spec.sensitiveValues ?? [])];
   for (const file of spec.envFiles?.length ? spec.envFiles : [join(spec.cwd, '.env')]) {
-    try { Object.keys(parseEnvFile(await readFile(file, 'utf8'))).forEach(key => keys.add(key)); }
+    try {
+      const values = parseEnvFile(await readFile(file, 'utf8'));
+      for (const key of Object.keys(values)) { keys.add(key); sensitiveValues.push(values[key], environment[key]); }
+    }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
   for (const kind of ['configs', 'secrets']) {
     for (const resource of Object.values(model[kind] ?? {})) if (resource.environment) keys.add(resource.environment);
   }
   const captured = Object.fromEntries([...keys].filter(key => Object.hasOwn(environment, key)).map(key => [key, environment[key]]));
+  for (const key of keys) if (!Object.hasOwn(spec.env ?? {}, key) && Object.hasOwn(process.env, key)) sensitiveValues.push(captured[key]);
+  const unresolved = await parseCompose(spec, ['--no-env-resolution']);
+  for (const [name, service] of Object.entries(unresolved.services ?? {})) {
+    for (const file of service.env_file ?? []) {
+      try {
+        const source = await readFile(resolve(spec.cwd, (typeof file === 'string' ? file : file.path).replaceAll('$$', '$')), 'utf8');
+        for (const line of source.split('\n')) {
+          const key = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|$)/.exec(line)?.[1];
+          if (!key || Object.hasOwn(service.environment ?? {}, key)) continue;
+          const value = model.services[name]?.environment?.[key];
+          if (typeof value === 'string') sensitiveValues.push(value.replaceAll('$$', '$'));
+        }
+      }
+      catch (error) { if (error.code !== 'ENOENT' || file.required !== false) throw new Error('Cannot read a Compose environment file. Check its path and permissions.'); }
+    }
+  }
+  for (const resource of Object.values(model.secrets ?? {})) {
+    if (resource.environment) sensitiveValues.push(captured[resource.environment]);
+    if (resource.file) sensitiveValues.push(await readFile(resolve(spec.cwd, resource.file.replaceAll('$$', '$')), 'utf8'));
+  }
   // Capture the resolved model before the CLI sends it to a daemon with another shell environment.
-  return { ...spec, compose: { ...spec.compose, model, environment: captured }, services: composeServiceMetadata(model, spec.compose) };
+  return { ...spec, sensitiveValues: [...new Set(sensitiveValues.filter(value => typeof value === 'string' && value))].sort(), compose: { ...spec.compose, model, environment: captured }, services: composeServiceMetadata(model, spec.compose) };
 }
 
 async function checkoutPath(spec, source, workspace) {
@@ -194,7 +218,7 @@ export class ComposeProvider extends DockerProvider {
   }
   async docker(spec, args, options) {
     try { return await super.docker(spec, args, options); }
-    catch (error) { throw Object.assign(new Error('Docker operation failed. Check Docker access and service status.'), { exitCode: error.exitCode ?? 1 }); }
+    catch (error) { throw Object.assign(new Error(redactEnvironment(error.message, sensitiveValuesForSpec(spec))), { exitCode: error.exitCode ?? 1 }); }
   }
   async compose(handle, args) {
     try {
@@ -208,7 +232,7 @@ export class ComposeProvider extends DockerProvider {
   async prepare(spec, workspace, directory) {
     const model = structuredClone(spec.compose.model ?? await parseCompose(spec));
     const environment = spec.compose.environment ?? await interpolationEnvironment(spec);
-    const redactions = [...Object.values(spec.env ?? {}), ...Object.values(environment)];
+    const redactions = sensitiveValuesForSpec(spec);
     const services = composeServiceMetadata(model, spec.compose);
     if (JSON.stringify(services) !== JSON.stringify(spec.services)) throw new Error('Compose routes changed after configuration. Load the specification again.');
     const project = this.prefix(spec);
@@ -294,7 +318,6 @@ export class ComposeProvider extends DockerProvider {
       }
     }
     const localFile = join(directory, 'compose.json');
-    redactions.push(...Object.values(model.services).flatMap(service => Object.values(service.environment ?? {}).filter(value => typeof value === 'string').map(value => value.replaceAll('$$', '$'))));
     await writeFile(join(directory, 'redactions.json'), JSON.stringify(redactions), { mode: 0o600 });
     // Compose config already escapes interpolation for another Compose invocation.
     await writeFile(localFile, `${JSON.stringify(model, null, 2)}\n`, { mode: 0o600 });
@@ -377,6 +400,20 @@ export class ComposeProvider extends DockerProvider {
   }
   stop(handle) { return this.compose(handle, ['stop', '-t', '5']); }
   async remove(handle, purge = false) {
+    if (handle.removed) {
+      if (!purge) return;
+      const volumes = [];
+      for (const name of handle.ownedVolumes ?? []) {
+        if (!name.startsWith(`${this.prefix(handle.spec)}-`)) throw new Error('Refusing to remove a volume outside this instance.');
+        const found = (await this.docker(handle.spec, ['volume', 'ls', '-q', '--filter', `name=${name}`])).split(/\s+/);
+        if (!found.includes(name)) continue;
+        const [volume] = JSON.parse(await this.docker(handle.spec, ['volume', 'inspect', name]));
+        if (volume.Name !== name || volume.Labels?.['dev-now.owner'] !== handle.spec.owner || volume.Labels?.['com.docker.compose.project'] !== this.prefix(handle.spec)) throw new Error('Refusing to remove a volume with different ownership labels.');
+        volumes.push(name);
+      }
+      if (volumes.length) await this.docker(handle.spec, ['volume', 'rm', ...volumes]);
+      return;
+    }
     await this.compose(handle, ['down', '--remove-orphans', ...(purge ? ['--volumes'] : [])]);
     await rm(handle.runtimeDirectory, { recursive: true, force: true });
     if (handle.spec.host && handle.workspace.endsWith(`/.local/share/dev-now/${handle.spec.owner}/${handle.spec.name}`)) await this.command(handle.spec, ['rm', '-rf', '--', handle.workspace]);
@@ -390,7 +427,7 @@ export class ComposeProvider extends DockerProvider {
   }
   async exec(handle, name, command) {
     try { return await this.redact(handle, await super.exec(handle, name, command)); }
-    catch (error) { throw Object.assign(new Error('Compose execution failed. Check the command and service status.'), { exitCode: error.exitCode ?? 1 }); }
+    catch (error) { throw Object.assign(new Error(await this.redact(handle, error.message)), { exitCode: error.exitCode ?? 1 }); }
   }
   fork() { throw new Error('Compose volume forks require snapshot support. Use a new instance for an empty isolated stack.'); }
 }

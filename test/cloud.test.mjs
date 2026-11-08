@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { createCloudManager, cloudOptions, cloudInit } from '../src/cloud.mjs';
 import { run as realRun } from '../src/system.mjs';
 
-const spec = (cloud = {}) => ({ owner: 'test-owner', name: 'demo', cwd: '/checkout', provider: 'docker', services: {}, cloud });
+const spec = (cloud = {}) => ({ owner: 'test-owner', name: 'demo', cwd: '/checkout', provider: 'docker', services: {}, cloud: { provider: 'hetzner', ...cloud } });
 async function setup(t, settings = {}) {
   const home = await mkdtemp(join(tmpdir(), 'dev-now-cloud-'));
   t.after(() => rm(home, { recursive: true, force: true }));
@@ -309,10 +309,12 @@ test('purge refuses an untracked IPv6 address and still supports retry', async t
 });
 
 test('cloud options and bootstrap specify Docker repository packages without scheduling', () => {
-  assert.equal(cloudOptions().idleTimeoutMs, 1800000);
-  assert.equal(cloudOptions({ idleTimeoutMs: 0 }).idleTimeoutMs, 0);
+  assert.equal(cloudOptions('hetzner').idleTimeoutMs, 1800000);
+  assert.equal(cloudOptions({ provider: 'hetzner', idleTimeoutMs: 0 }).idleTimeoutMs, 0);
+  assert.throws(() => cloudOptions(), /explicitly/);
+  assert.throws(() => cloudOptions({ idleTimeoutMs: 100 }), /explicitly/);
   assert.throws(() => cloudOptions('unknown'), /hetzner/);
-  assert.throws(() => cloudOptions({ expiresAt: 'not-a-date' }), /ISO date/);
+  assert.throws(() => cloudOptions({ provider: 'hetzner', expiresAt: 'not-a-date' }), /ISO date/);
   const init = cloudInit('private\nkey', 'ssh-ed25519 public');
   assert.match(init, /download.docker.com/);
   assert.match(init, /docker-compose-plugin/);

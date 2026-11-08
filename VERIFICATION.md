@@ -7,7 +7,10 @@ Node 22 is the declared minimum. This session did not test Node 22 directly.
 ## Automated checks
 
 - `npm run check` and `git diff --check` passed.
-- `npm test` passed all 75 tests, with no skips.
+- The initial `npm test` run passed 75 tests. Independent review reproduced a race during snapshot inspection on subsequent runs.
+- The fix tolerates unrelated container removal while preserving other inspection failures.
+- Three consecutive isolated `npm test` runs then passed all 87 tests, with no skips.
+- Regression tests cover explicit cloud selection, idle shutdown, expiry, active peers, reconnect backoff, and secret redaction.
 - Native Docker E2E passed locally and through SSH.
 - Compose provider E2E passed builds, profiles, dependencies, completed jobs, aliases, health, isolation, external resources, and cleanup.
 - Integrated Compose CLI E2E passed locally and through SSH.
@@ -18,6 +21,9 @@ Node 22 is the declared minimum. This session did not test Node 22 directly.
 - Generated Postgres and Redis templates passed with native Docker and Compose. Redis retained writes across restart.
 
 The integrated Compose test exercised environment secrets, source preservation, Git worktree creation, copied changes, omitted credentials, snapshots, restore, and independent Postgres writes.
+After review fixes, the local test also resumed a secret-bearing fork from both directories and retained redacted output from failed commands.
+Local runtime and both service template E2E variants passed again after these fixes.
+The real Compose E2E also passed delayed volume purge after removal of its runtime file.
 The native Docker test also checked occupied ports, failed startup cleanup, retained-volume protection, command exit codes, and paths containing spaces.
 
 The cached local example started in approximately 4.2 seconds and resumed in 0.65 seconds.
@@ -81,7 +87,18 @@ Implementation worktrees were integrated and removed. All 18 task-prefixed tempo
 Final Docker inventories contained no dev-now test containers or volumes.
 Shared Docker caches were preserved. No global prune command ran.
 
-Disk availability changed from 9.8 GiB before cleanup to 11 GiB after temporary files and test images were removed.
+Disk availability changed from 9.8 GiB before the initial cleanup to 11 GiB afterward.
+Review tests removed their resources and temporary files. Available space remained 11 GiB at displayed precision.
 The daemon must remain running and connected for idle shutdown and expiry.
 Snapshots contain volume data, not a complete deployable source bundle.
 Firecracker execution and specific hosted sandbox vendors remain separate adapter work.
+
+## Independent review
+
+The specification review found one critical issue and four important issues. All five received fixes and regression coverage.
+The fixes prevent implicit cloud provisioning, preserve ordinary output, resume saved forks, tolerate concurrent container removal, and test maintenance decisions.
+Minor fixes scope service templates to their environment, support delayed Compose volume purge, complete CLI help, and preserve failed command output.
+Dashboard timestamps remain in BCN to follow the explicit project instructions.
+Automatic initialization supports Compose and Node projects. Other runtimes require an explicit command.
+Cloud timers apply to owned Hetzner machines.
+The separate engineering standards review remains pending.

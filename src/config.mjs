@@ -2,6 +2,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { loadEnvironment, resolveEnvironment, stringList } from './environments.mjs';
+import { cloudOptions } from './cloud.mjs';
 
 export const hash = value => createHash('sha256').update(value).digest('hex').slice(0, 8);
 export function validName(value) {
@@ -68,12 +69,29 @@ export async function loadSpec(options = {}, command = []) {
   const suffix = environment === 'default' ? '' : `-${hash(environment)}`;
   const configuredName = environmentName ?? (config.name ? environment === 'default' ? config.name : `${config.name.slice(0, 39)}${suffix}` : undefined);
   const spec = { ...config, cwd, environment, name: options.name ?? configuredName ?? `dev-${base}-${hash(cwd)}${suffix}`, provider: config.provider ?? 'docker' };
-  if (options.ssh) spec.host = options.ssh;
+  if ([options.ssh, options.local, options.cloud].filter(Boolean).length > 1) throw new Error('Select only one target: --ssh, --local, or --cloud.');
+  if (options.ssh) { spec.host = options.ssh; delete spec.cloud; }
   if (options.local) { delete spec.host; delete spec.cloud; delete spec.sshConfig; }
+  if (options.cloud) spec.cloud = { ...(typeof spec.cloud === 'object' ? spec.cloud : {}), provider: options.cloud };
+  const cloudFlags = ['cloud-type', 'location', 'idle-minutes', 'ttl-hours'];
+  if (!spec.cloud && cloudFlags.some(key => options[key] !== undefined)) throw new Error('Cloud options require --cloud hetzner or an explicit cloud provider in configuration.');
+  if (spec.cloud) {
+    const cloud = typeof spec.cloud === 'string' ? { provider: spec.cloud } : { ...spec.cloud };
+    if (options['cloud-type'] !== undefined) cloud.type = options['cloud-type'];
+    if (options.location !== undefined) cloud.location = options.location;
+    if (options['idle-minutes'] !== undefined) cloud.idleTimeoutMs = Number(options['idle-minutes']) * 60000;
+    if (options['ttl-hours'] !== undefined) {
+      const expires = Date.now() + Number(options['ttl-hours']) * 3600000;
+      if (!Number.isFinite(expires) || expires <= Date.now() || expires > 8640000000000000) throw new Error('TTL hours must be a positive number within the supported date range.');
+      cloud.expiresAt = new Date(expires).toISOString();
+    }
+    spec.cloud = cloudOptions(cloud);
+  }
   if (options['ssh-config']) spec.sshConfig = resolve(cwd, options['ssh-config']);
   spec.envFiles = stringList(options['env-file'] ?? config.envFiles ?? config.envFile, 'env-file').map(file => resolve(cwd, file));
   // These values remain in memory and private daemon state. Initialization never writes them.
-  spec.env = await loadEnvironment({ cwd, environment, files: spec.envFiles, values: config.env });
+  spec.sensitiveValues = [];
+  spec.env = await loadEnvironment({ cwd, environment, files: spec.envFiles, values: config.env, sensitiveValues: spec.sensitiveValues });
   const { detectComposeFiles, resolveComposeSpec } = await import('./providers/compose.mjs');
   const composeFiles = stringList(options['compose-file'] ?? config.compose?.files ?? config.composeFiles, 'compose-file');
   const detected = !config.provider && !config.services && !command.length ? await detectComposeFiles(cwd) : [];
@@ -93,7 +111,8 @@ export async function loadSpec(options = {}, command = []) {
     spec.services = { web: { image: options.image ?? 'node:22-bookworm-slim', port: Number(options.port ?? 3000), command: command.map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' '), volumes: { dependencies: '/workspace/node_modules', cache: '/root/.npm' } } };
   }
   for (const service of Object.values(spec.services ?? {})) {
-    service.env = { ...spec.env, ...await loadEnvironment({ cwd, environment, values: service.env, includeStored: false }) };
+    service.env = { ...spec.env, ...await loadEnvironment({ cwd, environment, values: service.env, includeStored: false, sensitiveValues: spec.sensitiveValues }) };
   }
+  spec.sensitiveValues = [...new Set(spec.sensitiveValues)].sort();
   return validate(spec);
 }

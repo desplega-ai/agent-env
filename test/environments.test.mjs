@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { listEnvironmentSecrets, loadEnvironment, parseEnvFile, readEnvironmentSecrets, redactEnvironment, resolveEnvironment, setEnvironmentSecret, unsetEnvironmentSecret } from '../src/environments.mjs';
+import { redact } from '../src/runtime.mjs';
 
 async function fixture(t) {
   const cwd = await mkdtemp(join(tmpdir(), 'dev-now-env-test-'));
@@ -65,4 +66,17 @@ test('environment files, private variables, and explicit references have determi
 test('redaction protects literal values and keeps its replacement text intact', () => {
   assert.equal(redactEnvironment('abc a red $(command)', ['abc', 'red', 'a', '$(command)']), '[redacted] [redacted] [redacted] [redacted]');
   assert.equal(redactEnvironment('ordinary text', {}), 'ordinary text');
+});
+
+test('redaction preserves ordinary literals and masks values from private sources', async t => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dev-now-redaction-'));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(join(cwd, 'explicit.env'), 'FILE_VALUE=file-private\n');
+  await setEnvironmentSecret({ cwd, home: cwd, key: 'PRIVATE', fromEnv: 'INPUT', env: { INPUT: 'store-private' } });
+  const sensitiveValues = [];
+  const env = await loadEnvironment({ cwd, home: cwd, files: ['explicit.env'], sensitiveValues,
+    env: { INPUT: 'shell-private' }, values: { HOST: '0.0.0.0', PORT: '5173', FLAG: '1', POSTGRES_DB: 'app', REFERENCE: { secret: 'PRIVATE' }, SHELL: { env: 'INPUT' } } });
+  const handle = { spec: { env, sensitiveValues } };
+  assert.equal(redact(handle, 'application http://0.0.0.0:5173/ (1 row)'), 'application http://0.0.0.0:5173/ (1 row)');
+  assert.equal(redact(handle, 'store-private file-private shell-private'), '[redacted] [redacted] [redacted]');
 });

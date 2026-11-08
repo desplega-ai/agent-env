@@ -6,7 +6,7 @@ import { startUi } from './ui.mjs';
 import { watchSource } from './watch.mjs';
 import { hash } from './config.mjs';
 import { home } from './paths.mjs';
-import { redactEnvironment } from './environments.mjs';
+import { redactEnvironment, sensitiveValuesForSpec } from './environments.mjs';
 
 export function serviceAlias(name, service, primary) {
   if (service === primary) return name;
@@ -15,10 +15,7 @@ export function serviceAlias(name, service, primary) {
 }
 export function redact(handle, text) {
   const spec = handle?.spec ?? {};
-  const values = [...Object.values(spec.env ?? {}), ...Object.values(spec.compose?.environment ?? {}),
-    ...Object.values(spec.services ?? {}).flatMap(service => Object.values(service.env ?? {})),
-    ...Object.values(spec.compose?.model?.services ?? {}).flatMap(service => Object.values(service.environment ?? {}))];
-  return redactEnvironment(String(text ?? ''), values);
+  return redactEnvironment(String(text ?? ''), sensitiveValuesForSpec(spec));
 }
 export class RuntimeExtras {
   constructor({ instances, connections, changed, status, logs, activity }) {

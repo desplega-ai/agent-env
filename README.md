@@ -82,7 +82,9 @@ dev-now env unset POSTGRES_PASSWORD
 ```
 
 Secret commands accept `--env NAME`. Values stay in a private store outside the checkout.
-The CLI prints secret names only. Logs and execution output redact resolved environment values.
+The CLI prints secret names only.
+Logs and execution output redact private store values, secret references, environment references, and values from environment files.
+Credential names such as `PASSWORD`, `TOKEN`, and `API_KEY` also trigger redaction. Ordinary literal ports, hosts, and database names remain readable.
 
 ```json
 {
@@ -119,6 +121,8 @@ dev-now up
 Postgres defaults to public port 55432. Redis defaults to 56379. Use `--port` to select another port.
 Both services retain data in named volumes. Postgres receives a generated password in the private environment store.
 Compose projects receive a separate `dev-now.addons.json` override.
+Use `add postgres --env review` to add the service and its secret only to the `review` environment.
+Compose uses a separate override file for each selected environment.
 
 Native Docker projects use this format:
 
@@ -147,7 +151,7 @@ Authenticate the installed `hcloud` CLI, then run:
 ```sh
 dev-now up --name cloud --cloud hetzner --location hel1
 dev-now down cloud
-dev-now up --name cloud --cloud hetzner --location hel1
+dev-now up cloud
 dev-now rm cloud --purge
 ```
 
@@ -159,6 +163,8 @@ A plain `rm` retains the cloud record so `list`, resume, and later purge remain 
 Forks share their source machine. Removing one fork preserves other instances on that machine.
 
 The default idle timeout is 30 minutes. Use `--idle-minutes 0` to disable it.
+Machine and lifecycle flags require `--cloud hetzner` or a configured cloud provider.
+An explicit `--ssh` or `--local` target overrides a configured cloud target.
 HTTP requests, WebSocket traffic, TCP traffic, source synchronization, and explicit service commands record activity.
 Use `--ttl-hours N` for an explicit destructive expiry.
 **Idle shutdown and expiry require the local daemon to remain running and connected.** They are not cloud-side schedules.
@@ -177,6 +183,16 @@ This creates a Git worktree, copies current source changes, copies volumes, and 
 Credentials and generated files are excluded from copied changes. The source remains unchanged.
 Without `--worktree`, `--branch`, or `--ref`, `fork` copies data and uses the existing source checkout.
 Forks require a new destination name and run on the source Docker host.
+
+Resume a saved fork from any directory:
+
+```sh
+dev-now down experiment
+dev-now up experiment
+```
+
+`up NAME` uses the saved configuration, including resolved secrets and the source path.
+`up --name NAME` loads the current project's configuration and checks it against the saved instance.
 
 ```sh
 dev-now snapshot app /existing/backups/checkpoint

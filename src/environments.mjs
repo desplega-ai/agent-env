@@ -142,27 +142,43 @@ export async function unsetEnvironmentSecret(options) {
   return existed;
 }
 
-export async function loadEnvironment({ cwd, environment = 'default', files = [], values = {}, home, env = process.env, includeStored = true }) {
+export async function loadEnvironment({ cwd, environment = 'default', files = [], values = {}, home, env = process.env, includeStored = true, sensitiveValues = [] }) {
   const result = Object.create(null);
   for (const filename of stringList(files, 'env-file')) {
-    Object.assign(result, parseEnvFile(await readFile(resolve(cwd, filename), 'utf8')));
+    const fileValues = parseEnvFile(await readFile(resolve(cwd, filename), 'utf8'));
+    sensitiveValues.push(...Object.values(fileValues));
+    Object.assign(result, fileValues);
   }
   const secrets = await readEnvironmentSecrets({ cwd, environment, home });
-  if (includeStored) Object.assign(result, secrets);
+  if (includeStored) { Object.assign(result, secrets); sensitiveValues.push(...Object.values(secrets)); }
   for (const [key, reference] of Object.entries(values)) {
     checkKey(key);
     if (typeof reference === 'string') result[key] = reference;
     else if (reference && Object.keys(reference).length === 1 && typeof reference.secret === 'string') {
       if (!Object.hasOwn(secrets, reference.secret)) throw new Error(`Private variable ${reference.secret} is not set for environment ${environment}.`);
       result[key] = secrets[reference.secret];
+      sensitiveValues.push(result[key]);
     } else if (reference && Object.keys(reference).length === 1 && typeof reference.env === 'string') {
       checkKey(reference.env);
       if (!Object.hasOwn(env, reference.env)) throw new Error(`Environment reference ${reference.env} is not defined.`);
       result[key] = env[reference.env];
+      sensitiveValues.push(result[key]);
     } else throw new Error(`Use a string, {secret: name}, or {env: name} for variable ${key}.`);
     if (typeof result[key] !== 'string' || result[key].includes('\0')) throw new Error('Environment values must be strings without null bytes.');
   }
   return result;
+}
+
+export function credentialValues(values = {}) {
+  return Object.entries(values).filter(([key]) => /(?:^|_)(?:PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIALS?|API_KEY|PRIVATE_KEY|ACCESS_KEY)(?:_|$)/i.test(key)).map(([, value]) => value);
+}
+
+export function sensitiveValuesForSpec(spec = {}) {
+  return [...new Set([
+    ...(spec.sensitiveValues ?? []), ...credentialValues(spec.env), ...credentialValues(spec.compose?.environment),
+    ...Object.values(spec.services ?? {}).flatMap(service => credentialValues(service.env)),
+    ...Object.values(spec.compose?.model?.services ?? {}).flatMap(service => credentialValues(service.environment).map(value => typeof value === 'string' ? value.replaceAll('$$', '$') : value)),
+  ].filter(value => typeof value === 'string').flatMap(value => [value, value.trimEnd()]).filter(Boolean))];
 }
 
 export function redactEnvironment(output, values) {

@@ -87,6 +87,43 @@ test('default dotenv interpolation stays private and supports log redaction', { 
   assert.ok(value);
   assert.equal(await new ComposeProvider().redact({ runtimeDirectory }, `prefix ${value} suffix`), 'prefix [redacted] suffix');
 });
+
+test('Compose redaction preserves literals and captures service environment files', { skip: !composeAvailable }, async t => {
+  const cwd = await fixture(t, 'services:\n  worker:\n    image: busybox:1.37\n    env_file: private.env\n    secrets: [file-secret]\n    environment:\n      HOST: 0.0.0.0\n      PORT: "5173"\n      FLAG: "1"\n      POSTGRES_DB: app\nsecrets:\n  file-secret:\n    file: private.txt\n');
+  await writeFile(join(cwd, 'private.env'), 'UNSET_VALUE\nFILE_VALUE=file-private\nEXPANDED=${POSTGRES_DB}-private\nPORT=1000\n');
+  await writeFile(join(cwd, 'private.txt'), 'file-secret-private\n');
+  await writeFile(join(cwd, 'dev-now.json'), JSON.stringify({ env: { POSTGRES_DB: 'app', PORT: '5173' } }));
+  const previous = process.env.PORT;
+  process.env.PORT = '1234';
+  t.after(() => { if (previous === undefined) delete process.env.PORT; else process.env.PORT = previous; });
+  const spec = { ...await loadSpec({ cwd }), owner: 'test-owner' };
+  const runtimeDirectory = await fixture(t);
+  const provider = new ComposeProvider();
+  await provider.prepare(spec, cwd, runtimeDirectory);
+  assert.equal(await provider.redact({ runtimeDirectory }, 'application 0.0.0.0:5173 (1 row) file-private app-private file-secret-private'), 'application 0.0.0.0:5173 (1 row) [redacted] [redacted] [redacted]');
+});
+
+test('retained Compose volumes can be purged without the removed runtime file', async () => {
+  const provider = new ComposeProvider();
+  const spec = { name: 'demo', owner: 'test-owner' };
+  const volume = `${provider.prefix(spec)}-data`;
+  const calls = [];
+  let owner = spec.owner;
+  provider.docker = async (_spec, args) => {
+    calls.push(args);
+    if (args[1] === 'ls') return volume;
+    if (args[1] === 'inspect') return JSON.stringify([{ Name: volume, Labels: { 'dev-now.owner': owner, 'com.docker.compose.project': provider.prefix(spec) } }]);
+    if (args[1] === 'rm') return '';
+    assert.fail(`Unexpected Docker operation: ${args.join(' ')}`);
+  };
+  const handle = { spec, removed: true, ownedVolumes: [volume], runtimeDirectory: '/missing' };
+  await provider.remove(handle, true);
+  assert.deepEqual(calls.at(-1), ['volume', 'rm', volume]);
+  owner = 'another-owner';
+  calls.length = 0;
+  await assert.rejects(provider.remove(handle, true), /ownership labels/);
+  assert.ok(calls.every(args => args[1] !== 'rm'));
+});
 test('remote normalization maps build and bind paths while disabled profiles remain inactive', { skip: !composeAvailable }, async t => {
   const cwd = await fixture(t, 'services:\n  web:\n    build: .\n    ports: ["8088:3000"]\n    volumes: [".:/app"]\n  unused:\n    image: busybox:1.37\n    profiles: [optional]\n    volumes: ["/outside-the-checkout:/data"]\n');
   await writeFile(join(cwd, 'Dockerfile'), 'FROM busybox:1.37\n');

@@ -80,6 +80,23 @@ test('Compose volume identity comes from inspection, with an explicit restore ma
   assert.equal(result.volumeNames.v0, destinationName);
 });
 
+test('snapshot skips an unrelated removed container but preserves inspection failures', { skip: unavailable }, async t => {
+  const f = await fixture(t);
+  const wrapped = Object.create(provider);
+  let remains = false, injected = false;
+  const missing = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
+  wrapped.docker = async (spec, args, options) => {
+    if (args.join(' ') === 'container ls -aq') { injected = true; return `${await provider.docker(spec, args, options)}\n${missing}`; }
+    if (args[0] === 'inspect' && args.includes(missing)) throw new Error('Container inspection failed.');
+    if (args.includes(`id=${missing}`)) return remains ? missing : '';
+    return provider.docker(spec, args, options);
+  };
+  await snapshotInstance(f.handle, join(f.directory, 'race'), wrapped);
+  assert.equal(injected, true);
+  remains = true;
+  await assert.rejects(snapshotInstance(f.handle, join(f.directory, 'denied'), wrapped), /Container inspection failed/);
+});
+
 test('snapshot requires stopped services and rejects shared or external mounts', { skip: unavailable }, async t => {
   const f = await fixture(t);
   const location = join(f.directory, 'snapshot');

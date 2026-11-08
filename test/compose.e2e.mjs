@@ -105,6 +105,11 @@ try {
   handles.splice(handles.indexOf(external), 1);
   await run('docker', ['volume', 'inspect', externalVolume]);
   await run('docker', ['network', 'inspect', externalNetwork]);
+  await provider.remove(restored);
+  restored.removed = true;
+  await provider.remove(restored, true);
+  handles.splice(handles.indexOf(restored), 1);
+  for (const volume of restored.ownedVolumes) assert.equal(await run('docker', ['volume', 'ls', '-q', '--filter', `name=^${volume}$`]), '');
   console.log('PASS: Compose builds, profiles, dependencies, jobs, health, port aliases, loopback ports, private secrets, Postgres isolation, persistence, failure cleanup, source preservation, and external resource protection.');
 } finally {
   const errors = [];

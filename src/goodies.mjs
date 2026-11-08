@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { detectComposeFiles } from './providers/compose.mjs';
 import { loadSpec } from './config.mjs';
-import { readEnvironmentSecrets, setEnvironmentSecret } from './environments.mjs';
+import { readEnvironmentSecrets, setEnvironmentSecret, resolveEnvironment } from './environments.mjs';
 
 export async function addService(kind, options = {}) {
   if (!['postgres', 'redis'].includes(kind)) throw new Error('Available services: postgres, redis.');
@@ -18,6 +18,11 @@ export async function addService(kind, options = {}) {
     config = files.length ? { provider: 'compose', compose: { files } } : { provider: 'docker', services: {} };
   }
   if (config.provider && !['docker', 'compose'].includes(config.provider)) throw new Error('Service templates support Docker and Compose projects.');
+  const environment = options.environment ?? 'default';
+  const existingEnvironment = environment === 'default' || Object.hasOwn(config.environments ?? {}, environment);
+  if (environment !== 'default') { config.environments ??= {}; config.environments[environment] ??= {}; }
+  const resolved = resolveEnvironment(config, environment);
+  const target = environment === 'default' ? config : config.environments[environment];
   const port = Number(options.port ?? (kind === 'postgres' ? 55432 : 56379));
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Use a public port between 1024 and 65535.');
   const postgres = kind === 'postgres';
@@ -29,14 +34,15 @@ export async function addService(kind, options = {}) {
     ...(postgres ? { env: { POSTGRES_DB: 'app', POSTGRES_PASSWORD: { secret: 'POSTGRES_PASSWORD' } } } : { command: 'redis-server --appendonly yes' }),
   };
   if (config.provider === 'compose' || config.compose) {
-    const current = await loadSpec({ cwd, config: existing ? options.config : undefined, env: options.environment });
+    const current = await loadSpec({ cwd, config: existing ? options.config : undefined, env: existingEnvironment ? environment : undefined });
     if (current.compose.model.services[kind]) throw new Error(`Service ${kind} already exists in the Compose project.`);
     if (Object.values(current.services).some(service => service.port === port)) throw new Error(`Port ${port} already belongs to another service.`);
-    const addon = resolve(cwd, 'dev-now.addons.json');
+    const addonName = environment === 'default' ? 'dev-now.addons.json' : `dev-now.addons.${environment}.json`;
+    const addon = resolve(cwd, addonName);
     let model;
     try { model = JSON.parse(await readFile(addon, 'utf8')); }
     catch (error) { if (error.code !== 'ENOENT') throw error; model = { services: {}, volumes: {} }; }
-    if (model.services[kind]) throw new Error(`Service ${kind} already exists in dev-now.addons.json.`);
+    if (model.services[kind]) throw new Error(`Service ${kind} already exists in ${addonName}.`);
     model.services[kind] = {
       image: service.image, ports: [`${port}:${service.containerPort}`],
       volumes: [`${kind}-data:${service.volumes.data}`],
@@ -45,21 +51,21 @@ export async function addService(kind, options = {}) {
         : { command: ['redis-server', '--appendonly', 'yes'] }),
     };
     model.volumes[`${kind}-data`] = {};
-    config.provider = 'compose';
-    config.compose ??= {};
-    config.compose.files = [...new Set([...(config.compose.files ?? await detectComposeFiles(cwd)), 'dev-now.addons.json'])];
+    target.provider = 'compose';
+    target.compose ??= {};
+    target.compose.files = [...new Set([...(resolved.compose?.files ?? await detectComposeFiles(cwd)), addonName])];
     await writeFile(addon, `${JSON.stringify(model, null, 2)}\n`);
   } else {
-    config.services ??= {};
-    if (config.services[kind]) throw new Error(`Service ${kind} already exists.`);
-    if (Object.values(config.services).some(service => service.port === port)) throw new Error(`Port ${port} already belongs to another service.`);
-    config.services[kind] = service;
+    target.services ??= {};
+    if (resolved.services?.[kind]) throw new Error(`Service ${kind} already exists.`);
+    if (Object.values(resolved.services ?? {}).some(service => service.port === port)) throw new Error(`Port ${port} already belongs to another service.`);
+    target.services[kind] = service;
   }
   if (postgres) {
-    const secretOptions = { cwd, environment: options.environment ?? 'default' };
+    const secretOptions = { cwd, environment };
     const values = await readEnvironmentSecrets(secretOptions);
     if (!Object.hasOwn(values, 'POSTGRES_PASSWORD')) await setEnvironmentSecret({ ...secretOptions, key: 'POSTGRES_PASSWORD', fromEnv: 'GENERATED', env: { GENERATED: randomBytes(24).toString('base64url') } });
   }
   await writeFile(filename, `${JSON.stringify(config, null, 2)}\n`);
-  return { message: `Added ${kind} on localhost:${port}. Run dev-now up.` };
+  return { message: `Added ${kind} on localhost:${port}. Run dev-now up${environment === 'default' ? '' : ` --env ${environment}`}.` };
 }

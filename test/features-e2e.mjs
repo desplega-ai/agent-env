@@ -15,7 +15,7 @@ const storage = process.env.DEV_NOW_TEST_S3 ?? join(directory, 'snapshot');
 const endpoint = process.env.DEV_NOW_TEST_S3_ENDPOINT;
 const storageOptions = endpoint ? ['--endpoint', endpoint] : [];
 const env = { ...process.env, DEV_NOW_HOME: home, DEV_NOW_TEST_PASSWORD: 'private-e2e-value-$-literal' };
-const cli = async args => JSON.parse(await run(process.execPath, [join(root, 'bin/dev-now.mjs'), '--json', ...args], { cwd, env }));
+const cli = async (args, directory = cwd) => JSON.parse(await run(process.execPath, [join(root, 'bin/dev-now.mjs'), '--json', ...args], { cwd: directory, env }));
 const exec = async (name, service, args) => (await cli(['exec', name, '--service', service, '--', ...args])).output;
 const sql = (name, query) => exec(name, 'db', ['psql', '-U', 'postgres', '-d', 'app', '-Atc', query]);
 const images = new Set();
@@ -75,6 +75,18 @@ volumes:
   await assert.rejects(stat(join(fork.worktree, '.env.local')), { code: 'ENOENT' });
   assert.equal(await sql('beta', 'SELECT value FROM evidence'), 'persisted');
   await sql('beta', "UPDATE evidence SET value='fork-only';");
+  for (const directory of [cwd, fork.worktree]) {
+    await cli(['down', 'beta']);
+    await cli(['up', 'beta'], directory);
+    assert.equal(await exec('beta', 'db', ['printenv', 'POSTGRES_PASSWORD']), '[redacted]');
+    assert.equal(await sql('beta', 'SELECT value FROM evidence'), 'fork-only');
+  }
+  await assert.rejects(exec('beta', 'db', ['sh', '-c', 'printf "application port 5173: %s" "$POSTGRES_PASSWORD"; exit 7']), error => {
+    assert.equal(error.exitCode, 7);
+    assert.match(error.message, /application port 5173: \[redacted\]/);
+    assert.ok(!error.message.includes(env.DEV_NOW_TEST_PASSWORD));
+    return true;
+  });
   await cli(['restore', storage, '--name', 'restored', '--env', 'review', ...remoteOptions, ...storageOptions]);
   assert.equal(await sql('restored', 'SELECT value FROM evidence'), 'persisted');
   assert.equal(await sql('beta', 'SELECT value FROM evidence'), 'fork-only');
