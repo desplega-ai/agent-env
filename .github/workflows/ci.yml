@@ -1,0 +1,191 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release the current master version after all CI jobs pass
+        type: boolean
+        default: false
+      use_npm_token:
+        description: Use NPM_TOKEN for bootstrap instead of npm OIDC
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Preserve version bumps while earlier master runs finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  queue: max
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      version: ${{ steps.pack.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+          package-manager-cache: false
+      - run: npm run check
+      - name: Check version against the complete push
+        id: version
+        run: node scripts/release-version.mjs
+      - name: Pack once and audit the archive
+        id: pack
+        run: node scripts/pack.mjs "$RUNNER_TEMP/agent-env-artifact"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/agent-env-artifact/*.tgz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove local package output
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/agent-env-artifact"
+
+  core:
+    name: Core (${{ matrix.os }}, Node ${{ matrix.node }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+        node: ['22', 'lts/*']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/agent-env-artifact
+      - name: Test the installed package
+        env:
+          TARBALL: ${{ needs.package.outputs.tarball }}
+          CI_E2E_ROOT: ${{ runner.temp }}/agent-env-e2e-core
+        run: bash scripts/ci-e2e.sh "$RUNNER_TEMP/agent-env-artifact/$TARBALL" core
+      - name: Clean private test state
+        if: always()
+        run: |
+          bash scripts/ci-cleanup.sh "$RUNNER_TEMP/agent-env-e2e-core"
+          rm -rf "$RUNNER_TEMP/agent-env-artifact"
+
+  integration:
+    name: E2E (${{ matrix.group }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [docker, compose, ssh, s3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/agent-env-artifact
+      - name: Check Docker and Compose
+        run: |
+          docker info
+          docker compose version
+      - name: Install the real SSH fixture dependencies
+        if: matrix.group == 'ssh'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openssh-server rsync
+      - name: Check AWS CLI
+        if: matrix.group == 's3'
+        run: aws --version
+      - name: Test the installed package
+        env:
+          TARBALL: ${{ needs.package.outputs.tarball }}
+          GROUP: ${{ matrix.group }}
+          CI_E2E_ROOT: ${{ runner.temp }}/agent-env-e2e-${{ matrix.group }}
+        run: bash scripts/ci-e2e.sh "$RUNNER_TEMP/agent-env-artifact/$TARBALL" "$GROUP"
+      - name: Clean fixtures and private test state
+        if: always()
+        env:
+          GROUP: ${{ matrix.group }}
+        run: |
+          bash scripts/ci-cleanup.sh "$RUNNER_TEMP/agent-env-e2e-$GROUP"
+          rm -rf "$RUNNER_TEMP/agent-env-artifact"
+
+  ci:
+    name: CI
+    if: always()
+    needs: [package, core, integration]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: node -e 'for (const job of Object.values(JSON.parse(process.env.RESULTS))) if (job.result !== "success") process.exit(1)'
+
+  release:
+    name: Publish tested package
+    needs: [package, ci]
+    if: >-
+      github.repository == 'desplega-ai/agent-env' &&
+      github.ref == 'refs/heads/master' &&
+      needs.package.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/agent-env-artifact
+      - name: Publish the exact tested archive, tag, and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          USE_NPM_TOKEN: ${{ inputs.use_npm_token || vars.NPM_USE_TOKEN || 'false' }}
+          RELEASE_VERSION: ${{ needs.package.outputs.version }}
+          TARBALL: ${{ needs.package.outputs.tarball }}
+        run: node scripts/release.mjs "$RUNNER_TEMP/agent-env-artifact/$TARBALL"
+      - name: Remove local package output
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/agent-env-artifact"

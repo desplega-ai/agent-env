@@ -1,0 +1,62 @@
+name: Manual Hetzner E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hetzner-e2e
+  queue: max
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  cloud:
+    if: github.repository == 'desplega-ai/agent-env' && github.ref == 'refs/heads/master'
+    environment: hetzner-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+          package-manager-cache: false
+      - name: Install the pinned Hetzner CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/agent-env-cloud-tools"
+          curl --fail --silent --show-error --location --max-time 120 \
+            https://github.com/hetznercloud/cli/releases/download/v1.70.2/hcloud-linux-amd64.tar.gz \
+            --output "$RUNNER_TEMP/agent-env-cloud-tools/hcloud.tar.gz"
+          echo "b844bd28240112b0254183ba5266d0a0f59a6167c196636936459755efb88050  $RUNNER_TEMP/agent-env-cloud-tools/hcloud.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/agent-env-cloud-tools/hcloud.tar.gz" -C "$RUNNER_TEMP/agent-env-cloud-tools" hcloud
+          echo "$RUNNER_TEMP/agent-env-cloud-tools" >> "$GITHUB_PATH"
+          sudo apt-get update
+          sudo apt-get install --yes rsync
+      - run: npm run check
+      - name: Pack and audit
+        id: pack
+        run: node scripts/pack.mjs "$RUNNER_TEMP/agent-env-artifact"
+      - name: Run the authorized cloud suite
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          AGENT_ENV_TEST_CLOUD: '1'
+          CI_E2E_ROOT: ${{ runner.temp }}/agent-env-e2e-cloud
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          test -n "$HCLOUD_TOKEN"
+          bash scripts/ci-e2e.sh "$RUNNER_TEMP/agent-env-artifact/$TARBALL" cloud
+      - name: Always remove cloud resources and local files
+        if: always()
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+        run: |
+          bash scripts/ci-cleanup.sh "$RUNNER_TEMP/agent-env-e2e-cloud"
+          rm -rf "$RUNNER_TEMP/agent-env-artifact" "$RUNNER_TEMP/agent-env-cloud-tools"

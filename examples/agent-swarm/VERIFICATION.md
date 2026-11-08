@@ -1,11 +1,11 @@
 # Verification evidence
 
 Verified on 2026-11-08 with the real Agent Swarm application.
-Source checkout: `/Users/taras/Documents/code/agent-swarm`.
+Source: a local Agent Swarm checkout.
 Source revision: `122d2ea1c9e3241968b75be3df7f5c9edd623c87`.
 The original checkout remained unchanged.
 
-The final run used a private copy of that source under `/tmp/agent-env-swarm-pc5WoW/workspace`.
+The final run used a private copy of that source in a temporary directory.
 It copied `agent-env.json` and `compose.agent-env.yaml` into that directory.
 The configuration bound this copy directly into the containers.
 No source files were mocked or replaced.
@@ -16,13 +16,13 @@ The host does not need Bun.
 
 ## Commands exercised
 
-Run from the private source copy:
+Run from the private source copy. Paths below use placeholders:
 
 ```sh
-export AGENT_ENV_HOME=/tmp/agent-env-swarm-pc5WoW/state
-export CLI=/Users/taras/.t3/projects/dev-now/bin/agent-env.mjs
-export EXAMPLE=/Users/taras/.t3/projects/dev-now/examples/agent-swarm
-export TEST_ENV=/tmp/agent-env-swarm-pc5WoW/test.env
+export AGENT_ENV_HOME=/path/to/private-test/state
+export CLI=/path/to/agent-env/bin/agent-env.mjs
+export EXAMPLE=/path/to/agent-env/examples/agent-swarm
+export TEST_ENV=/path/to/private-test/test.env
 node "$CLI" up --name swarm-example --env-file "$TEST_ENV"
 node "$CLI" use swarm-example
 node "$CLI" list
