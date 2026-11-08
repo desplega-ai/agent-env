@@ -82,6 +82,10 @@ Both instances retain named addresses, such as `local.localhost:3000` and `remot
 A selection change closes existing connections that used bare localhost. Named HTTP connections remain separate.
 
 SSH targets need Docker, rsync, Bash, and `timeout`. The local machine needs SSH and rsync.
+Native SSH mode can run inside a Swarm worker without local Docker.
+Compose mode also needs the Docker CLI and Compose plugin on the worker to resolve configuration, even with an SSH target.
+Local mode needs access to a running Docker engine. New local starts check these prerequisites before creating a routing daemon.
+Localhost addresses belong to the machine or worker running `agent-env`, not automatically to your laptop.
 Use an SSH alias or `--ssh-config FILE` for keys and ports. Existing SSH hosts require verified host keys.
 
 Remote source synchronization starts automatically and follows file edits. Use `--no-watch` for manual synchronization.

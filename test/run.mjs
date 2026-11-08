@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 
 const groups = {
-  core: ['core.e2e.mjs', 'skill.e2e.mjs'],
+  core: ['core.e2e.mjs', 'skill.e2e.mjs', 'prerequisites.e2e.mjs'],
   docker: ['e2e.mjs', 'runtime-e2e.mjs', 'proxy.e2e.mjs', 'dotenv.e2e.mjs'],
   compose: ['compose.e2e.mjs', 'features-e2e.mjs', 'goodies-e2e.mjs', 'dotenv-compose.e2e.mjs'],
   features: ['features-e2e.mjs'],

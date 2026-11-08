@@ -13,6 +13,7 @@ import { addService } from '../src/goodies.mjs';
 import { setEnvironmentSecret, listEnvironmentSecrets, unsetEnvironmentSecret } from '../src/environments.mjs';
 import { delay } from '../src/system.mjs';
 import { skillCommand } from '../src/skill.mjs';
+import { checkLocalRuntime } from '../src/prerequisites.mjs';
 
 const help = `agent-env: development services with stable localhost addresses
 
@@ -203,6 +204,7 @@ async function main() {
     if (values.adapter) message.spec.sandbox = { ...message.spec.sandbox, adapter: values.adapter };
     if (values['no-watch']) message.spec.watch = false;
   }
+  if (message.spec) await checkLocalRuntime(message.spec);
   await ensureDaemon();
   if (type === 'up' && !values.json) console.error('Starting services. The first image download can take longer.');
   const result = await request(message);

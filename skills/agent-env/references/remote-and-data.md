@@ -7,6 +7,9 @@ This skill does not authorize paid infrastructure, trust changes, or data deleti
 ## Existing SSH hosts
 
 The local machine needs SSH and rsync.
+Native SSH mode does not require local Docker, so a Swarm worker can use a separate Docker host.
+Compose also requires a local Docker CLI and Compose plugin to resolve configuration. It does not require a local Docker engine.
+Localhost routes belong to the worker running `agent-env`. They do not appear automatically on the user's laptop.
 The remote host needs Docker, rsync, Bash, and `timeout`. Compose projects also need Docker Compose.
 Use an SSH alias or `--ssh-config FILE` for credentials and ports.
 Establish and verify the host key through the normal SSH workflow. Do not disable host verification.
