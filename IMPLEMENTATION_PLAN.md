@@ -1,5 +1,9 @@
 # Runtime expansion
 
+This is the historical plan for the `dev-now` prototype.
+The project now uses `agent-env` and CLI E2E tests.
+See [the README](README.md) and [release instructions](docs/releases.md) for current commands.
+
 Taras authorized autonomous implementation of the roadmap on 2026-11-08.
 Exclude the injected browser switcher. Include a small status UI and HTTPS.
 

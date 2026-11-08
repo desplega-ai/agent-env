@@ -1,0 +1,11 @@
+{
+  "provider": "compose",
+  "startupTimeoutSeconds": 900,
+  "compose": {
+    "files": ["compose.agent-env.yaml"],
+    "routes": {
+      "api": { "service": "api", "target": 3013, "port": 4313, "protocol": "http" },
+      "ui": { "service": "ui", "target": 5274, "port": 4574, "protocol": "http" }
+    }
+  }
+}

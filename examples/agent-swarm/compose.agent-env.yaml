@@ -1,0 +1,101 @@
+x-workspace: &workspace
+  - .:/workspace
+  - dependencies:/workspace/node_modules
+  - ui-dependencies:/workspace/apps/ui/node_modules
+  - templates-dependencies:/workspace/apps/templates-ui/node_modules
+  - evals-dependencies:/workspace/apps/evals/node_modules
+  - catalog-dependencies:/workspace/packages/model-catalog/node_modules
+  - routing-dependencies:/workspace/packages/model-routing/node_modules
+  - e2e-dependencies:/workspace/packages/ui-e2e/node_modules
+  - bun-cache:/root/.bun/install/cache
+
+services:
+  setup:
+    image: oven/bun:1.4.4
+    working_dir: /workspace
+    command: ["bun", "--no-env-file", "install", "--frozen-lockfile", "--ignore-scripts"]
+    volumes: *workspace
+  api:
+    image: oven/bun:1.4.4
+    working_dir: /workspace
+    command: ["bun", "--no-env-file", "--expose-gc", "src/http.ts"]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      AGENT_SWARM_API_KEY: ${AGENT_SWARM_API_KEY:?Provide a test-only API key through a private env file}
+      DATABASE_PATH: /data/agent-swarm.sqlite
+      AGENT_FS_LOCAL_DIR: /data/files
+      NODE_ENV: development
+      PORT: "3013"
+      MCP_BASE_URL: http://api:3013
+      APP_URL: http://localhost:4574
+      CORS_ALLOWED_ORIGINS: http://localhost:4574,http://${AGENT_SWARM_INSTANCE:-swarm-example}.localhost:4574
+      DESPLEGA_TELEMETRY_ENV: test
+      ANONYMIZED_TELEMETRY: "false"
+      CAPABILITIES: core,task,kv,skills,repo
+      HEARTBEAT_DISABLE: "true"
+      HEARTBEAT_CHECKLIST_DISABLE: "true"
+      TASK_AUTO_TITLE_ENABLED: "false"
+      RUNTIME_POOLS_ENABLED: "false"
+      CHAT_SDK_ENABLED: "false"
+      SLACK_DISABLE: "true"
+      GITHUB_DISABLE: "true"
+      GITLAB_DISABLE: "true"
+      AZURE_DEVOPS_DISABLE: "true"
+      BITBUCKET_DISABLE: "true"
+      AGENTMAIL_DISABLE: "true"
+      LINEAR_DISABLE: "true"
+      JIRA_DISABLE: "true"
+      OAUTH_KEEPALIVE_DISABLE: "true"
+      OAUTH_REFRESH_SWEEP_DISABLE: "true"
+    volumes:
+      - .:/workspace:ro
+      - dependencies:/workspace/node_modules
+      - ui-dependencies:/workspace/apps/ui/node_modules
+      - templates-dependencies:/workspace/apps/templates-ui/node_modules
+      - evals-dependencies:/workspace/apps/evals/node_modules
+      - catalog-dependencies:/workspace/packages/model-catalog/node_modules
+      - routing-dependencies:/workspace/packages/model-routing/node_modules
+      - e2e-dependencies:/workspace/packages/ui-e2e/node_modules
+      - data:/data
+    ports: ["127.0.0.1:4313:3013"]
+    healthcheck:
+      test: ["CMD", "bun", "--no-env-file", "-e", "fetch('http://127.0.0.1:3013/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+  ui:
+    image: oven/bun:1.4.4
+    working_dir: /workspace/apps/ui
+    command:
+      - bun
+      - --no-env-file
+      - -e
+      - "import {createServer} from 'vite'; const server = await createServer({envDir: false, server: {host: '0.0.0.0', port: 5274, strictPort: true}}); await server.listen(); server.printUrls();"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    environment:
+      VITE_PROXY_TARGET: http://api:3013
+      VITE_ALLOWED_HOSTS: .localhost
+      VITE_PLAUSIBLE_ANALYTICS: "false"
+    volumes: *workspace
+    ports: ["127.0.0.1:4574:5274"]
+    healthcheck:
+      test: ["CMD", "bun", "--no-env-file", "-e", "fetch('http://127.0.0.1:5274').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+volumes:
+  data: {}
+  dependencies: {}
+  ui-dependencies: {}
+  templates-dependencies: {}
+  evals-dependencies: {}
+  catalog-dependencies: {}
+  routing-dependencies: {}
+  e2e-dependencies: {}
+  bun-cache: {}
