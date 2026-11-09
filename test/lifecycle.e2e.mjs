@@ -156,6 +156,7 @@ for (const provider of ['docker', 'compose']) {
         assert.match(list[0].error, /Startup interrupted/);
         assert.deepEqual(await test.inventory(), resources, 'Restart must not start or delete interrupted resources.');
       }
+      await test.settleAllocation();
       const resumed = await test.invoke(['--json', 'up', '--name', name, '--timeout', '5'], false);
       if (resumed.code === 0) await route(port, name, 'before-interruption');
       const purged = await test.invoke(['--json', 'rm', name, '--purge'], false);
@@ -193,6 +194,8 @@ for (const provider of ['docker', 'compose']) {
       assert.notEqual(rejected.code, 0);
       assert.match(rejected.stderr, /Recover interrupted startup/);
     }
+    // The detached worker can still be active after the daemon exits.
+    await test.settleAllocation();
     await test.cli(['rm', name, '--purge']);
     await test.assertEmpty();
   });
@@ -261,6 +264,7 @@ for (const provider of ['docker', 'compose']) {
     const [volume] = (await test.inventory()).filter(item => item.kind === 'volume');
     await test.killDaemon();
     assert.notEqual((await pending.done).code, 0);
+    await test.settleAllocation();
     const failed = await test.invoke(['up', name, '--timeout', '1'], false);
     assert.notEqual(failed.code, 0, 'The closed gate must make recovery fail.');
     assert.equal((await test.cli(['list']))[0].recovery, 'required');
@@ -285,6 +289,7 @@ for (const provider of ['docker', 'compose']) {
       const [owned] = await containers(test, name);
       await test.killDaemon();
       if (pending) assert.notEqual((await pending.done).code, 0);
+      await test.settleAllocation();
       await docker(['rm', '-f', owned.id]);
       const foreign = await docker(['run', '-d', '--name', owned.name, '--label', `agent-env.owner=${owned.labels['agent-env.owner']}`, '--label', `agent-env.instance=${name}`, '--label', 'agent-env.record=foreign', 'busybox:1.37', 'sleep', '3600']);
       try {

@@ -14,14 +14,17 @@ export const docker = args => run('docker', args);
 // Only this read-only request bypasses the CLI. It identifies the socket owner.
 function ping(socketPath) {
   return new Promise((resolveResult, reject) => {
-    const request = http.request({ socketPath, method: 'POST', path: '/' }, async response => {
+    const request = http.request({ socketPath, method: 'POST', path: '/', agent: false }, async response => {
       try {
         let body = '';
         for await (const chunk of response) body += chunk;
         assert.equal(response.statusCode, 200);
+        // Close this client socket before checking the daemon's socket ownership.
+        await socketClosed;
         resolveResult(JSON.parse(body).pid);
       } catch (error) { reject(error); }
     });
+    const socketClosed = new Promise(resolveClosed => request.once('socket', socket => socket.once('close', resolveClosed)));
     request.setTimeout(2000, () => request.destroy(new Error('The socket ping timed out.')));
     request.on('error', reject);
     request.end(JSON.stringify({ type: 'ping' }));
