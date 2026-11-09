@@ -437,7 +437,9 @@ export class ComposeProvider extends DockerProvider {
     if (handle.allocation) await verifyAllocation(this, handle);
     await this.compose(handle, ['create', '--build']);
     const deadline = Date.now() + (handle.spec.startupTimeoutSeconds ?? 60) * 1000;
-    await this.compose(handle, ['up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', String(handle.spec.startupTimeoutSeconds ?? 60)]);
+    // create already reconciled the containers. A second recreation can turn
+    // anonymous mounts into named mounts that Docker no longer removes with -v.
+    await this.compose(handle, ['up', '-d', '--no-build', '--no-recreate', '--pull', 'never', '--wait', '--wait-timeout', String(handle.spec.startupTimeoutSeconds ?? 60)]);
     await this.wait(handle, deadline);
   }
   async removeImages(handle, images = handle.ownedImages ?? []) {

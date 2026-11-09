@@ -1,6 +1,6 @@
 {
   "name": "@desplega.ai/agent-env",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Run development services behind stable localhost addresses.",
   "type": "module",
   "bin": {

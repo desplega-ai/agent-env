@@ -71,6 +71,19 @@ node test/sdk.e2e.mjs
 The recovery SSH alias must reach the same Docker engine as the local CLI.
 Without the two SSH variables, the recovery suite runs its seven local scenarios.
 
+### Release compatibility checks
+
+PR CI exposed two failures on Docker 28.0.4 and Compose 2.38.2.
+Compose recreated prepared containers during `up`, which changed anonymous mount handling and left volumes after purge.
+Startup now uses `--no-recreate` after `create` reconciles the containers.
+The partial-creation test also assumed that daemon termination stops the detached Compose worker.
+It now verifies batch completion, removes one owned container, and tests recovery from that known partial state.
+Fixture cleanup tracks every owned image tag, including multiple tags for one image ID.
+Untagged build results remain outside the runtime cleanup contract, like other Docker build caches.
+
+The updated installed package passed all seven recovery and 16 lifecycle scenarios in an isolated Linux Docker 28.0.4 engine with Compose 2.38.2.
+The isolated Agent Swarm example also passed startup, authentication, routing, and persistence after restart with the startup change.
+
 ## 1. Short answer for Taras
 
 No. The test suite does not cover the whole functionality.

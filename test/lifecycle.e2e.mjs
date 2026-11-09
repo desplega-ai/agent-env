@@ -211,7 +211,7 @@ for (const provider of ['docker', 'compose']) {
     await writeFile(configPath, JSON.stringify(config));
     const pid = await test.daemonPid();
     const { owner } = JSON.parse(await readFile(join(test.home, 'state.json'), 'utf8'));
-    // The first container-create event precedes completion of the service set.
+    // Interrupt the daemon during allocation. Compose's worker can finish its batch.
     // Read past events too, so subscription startup cannot miss this event.
     const events = spawn('docker', ['events', '--since', String(Math.floor(Date.now() / 1000) - 1), '--filter', 'type=container', '--filter', 'event=create', '--filter', `label=agent-env.instance=${name}`, '--filter', `label=agent-env.owner=${owner}`, '--format', '{{json .}}']);
     let observed = false;
@@ -226,12 +226,22 @@ for (const provider of ['docker', 'compose']) {
       assert.equal(observed, true);
     } finally { events.kill('SIGTERM'); }
     const resources = await test.inventory();
-    assert.ok(resources.filter(item => item.kind === 'container').length < 13, 'Interrupt before every configured service exists.');
+    const created = resources.filter(item => item.kind === 'container').length;
+    assert.ok(created > 0 && created <= 13, 'The interrupted startup must leave owned containers.');
+    if (provider === 'docker') assert.ok(created < 13, 'Interrupt before every configured service exists.');
     const [item] = await test.cli(['list']);
     assert.equal(item.recovery, 'required');
     assert.equal(item.running, false);
     await writeFile(join(test.cwd, 'release'), 'release');
     await test.settleAllocation();
+    if (provider === 'compose') {
+      const completed = (await test.inventory()).filter(item => item.kind === 'container');
+      assert.equal(completed.length, 13, 'The detached Compose worker must complete its allocation batch.');
+      // Create a deterministic partial set after the worker settles.
+      // This models an externally removed container without racing Compose creation.
+      await docker(['rm', '-fv', completed.find(item => item.name.endsWith('-extra0-1')).id]);
+      assert.equal((await test.inventory()).filter(item => item.kind === 'container').length, 12);
+    }
     await test.cli(['up', name, '--timeout', '30']);
     assert.equal((await test.inventory()).filter(item => item.kind === 'container').length, 13);
     await test.cli(['exec', name, '--service', 'web', '--', 'sh', '-c', 'printf partial-recovered > /data/proof']);

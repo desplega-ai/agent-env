@@ -94,12 +94,16 @@ export async function fixture(suite) {
       for (const id of ids) {
         if (kind === 'volume' && anonymous.has(id)) continue;
         const [info] = JSON.parse(await docker([kind, 'inspect', id]));
+        // Older engines retain untagged build results. Purge removes owned tags,
+        // while Docker build caches remain outside the runtime cleanup contract.
+        if (kind === 'image' && !info.RepoTags?.length) continue;
         const labels = (kind === 'container' || kind === 'image' ? info.Config?.Labels : info.Labels) ?? {};
-        const name = kind === 'container' ? info.Name.replace(/^\//, '') : kind === 'image' ? (info.RepoTags ?? []).find(expectedName) : info.Name;
+        const resourceNames = kind === 'image' ? (info.RepoTags ?? []).filter(expectedName)
+          : [kind === 'container' ? info.Name.replace(/^\//, '') : info.Name];
+        const name = resourceNames[0];
         const project = labels['com.docker.compose.project'];
         assert.ok(name && expectedName(name), `Refuse an unexpected ${kind} name: ${name}`);
         assert.ok(labels['agent-env.owner'] === owner || [...names].some(item => project === prefix(item)), `Refuse an unowned ${kind}: ${name}`);
-        const record = { kind, id: info.Id ?? info.Name, name, labels };
         if (kind === 'container') {
           for (const mount of info.Mounts ?? []) {
             if (mount.Type !== 'volume' || !/^[a-f0-9]{64}$/.test(mount.Name)) continue;
@@ -107,8 +111,11 @@ export async function fixture(suite) {
             anonymous.set(mount.Name, volume.CreatedAt);
           }
         }
-        found.push(record);
-        resources.set(`${kind}:${record.id}`, record);
+        for (const resourceName of resourceNames) {
+          const record = { kind, id: info.Id ?? info.Name, name: resourceName, labels };
+          found.push(record);
+          resources.set(`${kind}:${kind === 'image' ? resourceName : record.id}`, record);
+        }
       }
     }
     // Mount identities detect anonymous volumes even after their containers disappear.
