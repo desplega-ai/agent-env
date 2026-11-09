@@ -1,6 +1,6 @@
 {
   "name": "@desplega.ai/agent-env",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Run development services behind stable localhost addresses.",
   "type": "module",
   "bin": {
@@ -17,10 +17,12 @@
     "test:compose": "node test/run.mjs compose",
     "test:ssh": "node test/run.mjs ssh",
     "test:s3": "node test/run.mjs s3",
-    "test:cloud": "node test/run.mjs cloud"
+    "test:cloud": "node test/run.mjs cloud",
+    "test:devcontainer": "node test/run.mjs devcontainer",
+    "test:e2b": "node test/run.mjs e2b"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "os": [
     "darwin",
@@ -48,5 +50,10 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@devcontainers/cli": "0.90.0",
+    "e2b": "2.63.0",
+    "jsonc-parser": "3.3.1"
   }
 }

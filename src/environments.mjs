@@ -66,6 +66,7 @@ export function resolveEnvironment(config, name = 'default') {
   if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)) throw new Error('Environment definitions must be objects.');
   const result = { ...base, ...overlay, env: { ...base.env, ...overlay.env } };
   if (base.compose || overlay.compose) result.compose = { ...base.compose, ...overlay.compose };
+  for (const key of ['commands', 'e2b', 'devcontainer']) if (base[key] || overlay[key]) result[key] = { ...base[key], ...overlay[key] };
   if (base.services || overlay.services) {
     result.services = { ...base.services };
     for (const [service, value] of Object.entries(overlay.services ?? {})) {

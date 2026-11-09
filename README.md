@@ -7,7 +7,8 @@ Run a development stack locally, over SSH, or on an on-demand Hetzner machine. O
 Part of [Desplega Labs](https://desplega.sh), alongside [Agent Swarm](https://github.com/desplega-ai/agent-swarm) and [agent-fs](https://github.com/desplega-ai/agent-fs).
 Released under the [MIT license](LICENSE).
 
-The CLI runs on macOS or Linux with Node 22+, Docker, and a local routing daemon. It has no npm dependencies.
+The CLI runs on macOS or Linux with Node 22.19+ and a local routing daemon.
+Docker and Dev Container providers need Docker. The E2B provider needs an E2B account and API key.
 [Tesser](https://tesser.sh/) inspired the workflow. [Portless](https://github.com/vercel-labs/portless) informed the shared HTTPS proxy and local certificate authority.
 
 ## Start
@@ -48,7 +49,7 @@ agent-env up --name app --https
 agent-env ui
 ```
 
-`init` detects Compose files, package scripts, package managers, and common framework ports.
+`init` detects Dev Containers, Compose files, package scripts, package managers, and common framework ports.
 It never replaces an existing configuration or edits package scripts.
 For a first dependency installation, use `agent-env up --timeout 900` or set `startupTimeoutSeconds` in `agent-env.json`.
 Compose builds and image downloads finish before its shared readiness timeout begins.
@@ -112,6 +113,87 @@ Multiple published ports on one service require explicit aliases in `compose.rou
 UDP, replicas, host namespaces, custom network allocation, and some deployment features return explicit unsupported-feature errors.
 Remote bind and build paths must remain inside the checkout.
 See the [Compose example and contract](examples/compose/README.md).
+
+## E2B and Dev Containers
+
+The built-in `e2b` provider runs service commands inside one managed sandbox.
+It requires Node 22.19+ and an `E2B_API_KEY` from your shell, env file, or private store.
+Provider credentials stay outside service environments.
+
+```json
+{
+  "provider": "e2b",
+  "e2b": { "template": "base", "timeoutSeconds": 600 },
+  "services": {
+    "web": { "port": 3000, "command": "node --watch server.js" }
+  }
+}
+```
+
+Run `agent-env up --name review` with this configuration.
+The provider creates private ingress and maps HTTP and WebSockets to localhost.
+`down` pauses the sandbox. `up review` resumes it. `rm review --purge` destroys it.
+See [E2B configuration and limitations](docs/e2b.md).
+
+Existing `.devcontainer/devcontainer.json` and `.devcontainer.json` files work directly with `up`.
+Automatic detection preserves Compose priority when both configurations exist.
+Select `--provider devcontainer` to use the Dev Container explicitly.
+Use `--provider compose` to select Compose explicitly.
+Dev Containers support images, Dockerfiles, Compose, native lifecycle hooks, and `forwardPorts` through the official CLI.
+This provider currently requires local Docker.
+See [Dev Container routes, isolation, and examples](docs/devcontainers.md).
+
+## Project commands
+
+Declare repeatable operations in `agent-env.json`:
+
+```json
+{
+  "commands": {
+    "install": ["npm", "ci"],
+    "migrate": { "service": "api", "command": ["npm", "run", "migrate"] },
+    "seed": "npm run seed -- \"$@\"",
+    "test": ["npm", "test"],
+    "reset": ["npm", "run", "db:reset"]
+  }
+}
+```
+
+These entries extend your existing provider and service configuration.
+Commands run only when requested, inside a running service:
+
+```sh
+agent-env run app install
+agent-env run app migrate
+agent-env run app seed -- demo
+agent-env run app test -- --runInBand
+```
+
+Argument arrays execute directly. Extra CLI arguments append to the array.
+Shell strings run through `sh -c`. Extra arguments are available through `"$@"`.
+The E2B SDK adds an outer Bash login shell.
+Commands use their configured service, the Dev Container workspace, or the first service.
+Use `--service NAME` to select another service explicitly.
+Failures preserve the command's exit code and redact private values.
+`list --json` includes command names without command contents.
+Environment overlays can override individual commands.
+After editing commands, run `up --name NAME` to update the saved definitions without replacing containers.
+`run` and `exec` do not block status, logs, synchronization, or operations on other instances.
+The CLI waits without a command timeout. Output arrives when the command finishes.
+Stopping or removing an instance can interrupt commands that use it.
+E2B's configured sandbox lease still limits runtime, independently of command execution.
+
+## Source updates
+
+Local Docker and image/Dockerfile Dev Containers mount the checkout directly.
+Compose, including Dev Container Compose configurations, exposes source through the bind mounts declared in its files.
+SSH and E2B automatically synchronize source changes while the daemon runs.
+Use `--no-watch` to disable automatic synchronization, or `sync NAME` to synchronize explicitly.
+Synchronization excludes environment files, dependency directories, and configured build outputs.
+E2B also excludes common credential files and files containing known secret values.
+An application watcher, such as Vite or `node --watch`, must reload the changed source.
+Services without a watcher require `down NAME`, then `up NAME`.
+Source synchronization does not reload environment variables.
 
 ## Environments and secrets
 
@@ -332,8 +414,8 @@ agent-env daemon stop
 `rm --purge` also removes managed volumes and the instance's owned Compose image tags.
 Shared base images and Docker build caches remain available.
 For a removed local instance, recreate it with `up` before purging its retained volumes.
-Changes to ports, images, commands, mounts, or providers require `rm`, then `up`.
-Environment-only changes use `up --name NAME` and preserve volumes.
+Changes to ports, images, service startup commands, mounts, or providers require `rm`, then `up`.
+Environment-only changes for Docker and Compose use `up --name NAME` and preserve volumes.
 `daemon stop` stops routing, synchronization, and lifecycle timers. Containers remain running.
 The next command restores saved routing and enabled UI/HTTPS listeners.
 
@@ -343,11 +425,11 @@ Add `--discard-worktree` only when you intend to discard its changed and ignored
 
 State defaults to `~/.local/state/agent-env`. `AGENT_ENV_HOME` selects an isolated private state directory.
 State can contain environment values. Back up cloud ownership records and credentials before moving it.
-All application ports bind loopback. Remote traffic travels through SSH.
+All local application ports bind loopback. Remote traffic travels through SSH or E2B's authenticated HTTPS ingress.
 
 The [sandbox adapter contract](src/providers/CLOUD_SANDBOX.md) accepts trusted local ESM adapters with explicit capabilities.
 Use `--provider sandbox --adapter docker` for the included bridge.
-No hosted sandbox vendor or Firecracker runtime is bundled. Those require separate adapters.
+E2B is bundled as a provider. Other hosted sandbox vendors and Firecracker require separate adapters.
 Firecracker requires a Linux host with KVM access, a guest kernel, root filesystem, and guest networking.
 See [Firecracker's host requirements](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md).
 

@@ -1,6 +1,7 @@
 import { lstat, readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { detectComposeFiles } from './providers/compose.mjs';
+import { detectDevcontainerConfig } from './providers/devcontainer.mjs';
 import { quote } from './system.mjs';
 
 async function exists(filename) {
@@ -13,6 +14,7 @@ export async function createInitialConfig(options = {}) {
   const cwd = await realpath(options.cwd ?? process.cwd());
   const files = await detectComposeFiles(cwd);
   if (files.length && !options.command?.length) return { provider: 'compose', compose: { files } };
+  if (!options.command?.length && await detectDevcontainerConfig(cwd)) return { provider: 'devcontainer' };
   let manifest = {};
   try { manifest = JSON.parse(await readFile(resolve(cwd, 'package.json'), 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }

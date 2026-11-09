@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture } from './helpers.mjs';
+import { fixture, createCli } from './helpers.mjs';
 
 const test = await fixture('core', { AGENT_ENV_E2E_INPUT: 'private-core-value-$-literal' });
 const { cwd, home, cli, invoke } = test;
@@ -29,6 +29,7 @@ try {
     [['--unknown-flag'], /Unknown option/],
     [['down'], /instance name/],
     [['exec', 'missing'], /command after --/],
+    [['run', 'missing'], /run NAME COMMAND/],
     [['fork', 'missing'], /destination/],
     [['snapshot', 'missing'], /destination/],
     [['restore'], /snapshot directory/],
@@ -79,9 +80,30 @@ try {
   const conflict = await project('conflict', { 'package.json': { packageManager: 'bun@1' }, 'pnpm-lock.yaml': '{}' });
   await fails(['init'], /conflicts/, { cwd: conflict });
   const compose = await project('compose', { 'compose.yaml': 'services:\n  web:\n    image: busybox:1.37\n', 'compose.override.yaml': 'services: {}\n' });
+  await writeFile(join(compose, '.devcontainer.json'), '{"image":"node:22-bookworm-slim"}');
   await cli(['init'], { cwd: compose });
   assert.deepEqual(JSON.parse(await readFile(join(compose, 'agent-env.json'), 'utf8')), { provider: 'compose', compose: { files: ['compose.yaml', 'compose.override.yaml'] } });
   assert.equal(await readFile(join(compose, 'compose.yaml'), 'utf8'), 'services:\n  web:\n    image: busybox:1.37\n');
+
+  const devcontainer = await project('devcontainer-init', { '.devcontainer.json': '{ // existing project\n "image": "node:22-bookworm-slim"\n}' });
+  await cli(['init'], { cwd: devcontainer });
+  assert.deepEqual(JSON.parse(await readFile(join(devcontainer, 'agent-env.json'), 'utf8')), { provider: 'devcontainer' });
+  const e2b = await project('e2b-no-key', {});
+  const e2bState = join(test.directory, 'e2b-state');
+  const noKey = await createCli(e2b, e2bState, { E2B_API_KEY: '' }).invoke(['up', '--provider', 'e2b', '--port', '3010', '--', 'node', 'server.js'], false);
+  assert.notEqual(noKey.code, 0);
+  assert.match(noKey.stderr, /E2B_API_KEY/);
+  await assert.rejects(stat(e2bState), { code: 'ENOENT' });
+  await writeFile(join(e2b, 'agent-env.json'), JSON.stringify({ provider: 'e2b', e2b: { credentials: { apiKey: 'fixture-key-never-use' } } }));
+  const publicKey = await createCli(e2b, e2bState).invoke(['up'], false);
+  assert.notEqual(publicKey.code, 0);
+  assert.match(publicKey.stderr, /Do not put E2B credentials/);
+  assert.ok(!(publicKey.stdout + publicKey.stderr).includes('fixture-key-never-use'));
+  await assert.rejects(stat(e2bState), { code: 'ENOENT' });
+  for (const commands of [{ invalid: [] }, { install: { command: ['echo'], service: 'missing' } }, { install: { command: 'echo ok', unknown: true } }]) {
+    await writeFile(join(explicit, 'agent-env.json'), JSON.stringify({ services: { web: { image: 'busybox:1.37', port: 8123 } }, commands }));
+    await fails(['up', '--name', 'invalid-command'], /command/i, { cwd: explicit });
+  }
 
   const stored = await invoke(['env', 'set', 'TOKEN', '--env', 'review'], true, { input: 'private-core-value-$-literal\n' });
   assert.ok(!(stored.stdout + stored.stderr).includes('private-core-value-$-literal'));

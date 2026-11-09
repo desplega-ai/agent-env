@@ -1,6 +1,6 @@
 ---
 name: agent-env
-description: Run and troubleshoot development environments with agent-env, including Docker, Compose, dotenv, SSH, local routing, and persistent data.
+description: Run and troubleshoot development environments with agent-env, including Docker, Compose, Dev Containers, E2B, project commands, source sync, dotenv, and persistent data.
 license: MIT
 ---
 
@@ -16,7 +16,7 @@ Run `agent-env skill install` to install the bundled skill for your coding agent
 
 1. Inspect `agent-env.json`, Compose files, and package scripts before changing configuration.
 2. Check `agent-env --version`. If absent, install the CLI with `npm install -g @desplega.ai/agent-env`.
-3. Check `docker info`. Compose projects also require `docker compose version`.
+3. Check the provider prerequisites. Docker and Dev Containers require `docker info`. Compose also requires `docker compose version`.
 4. Inspect `agent-env --json list` before choosing an instance name or reusing ports.
 
 The CLI requires macOS or Linux and Node.js 22 or later.
@@ -27,6 +27,8 @@ Use local Docker when no remote target is requested.
 ## Start and verify
 
 Existing Compose files work directly with `up`.
+Existing Dev Container configurations also work directly. Compose retains priority when both configurations exist.
+Use `--provider devcontainer` to select the Dev Container explicitly.
 For another project without `agent-env.json`, run `agent-env init` to detect its development command.
 Do not overwrite an existing configuration.
 If detection fails, supply the actual project command, image, and port. For example:
@@ -92,6 +94,44 @@ For a Vite project using native Docker, define `services` in `agent-env.json`:
 Adapt the command to the project. Named volumes retain dependencies and application data.
 Use `agent-env add postgres` or `agent-env add redis` to generate a persistent service configuration.
 For a named environment, include `--env review` when adding its service.
+
+## Dev Containers, E2B, and project commands
+
+Dev Containers use local Docker and the official Dev Containers CLI bundled as a dependency.
+Native lifecycle hooks configure the workspace. Common HTTP ports become HTTP routes. Other forwarded ports become TCP routes.
+Use `portsAttributes` or explicit routes for HTTP services on other ports.
+Forwarded ports can remain closed during workspace startup. Start the application later with `exec` or a project command.
+Explicit `devcontainer.routes` require a listening service during startup.
+Use `devcontainer.routes` for explicit ports, protocols, or Compose service targets.
+Compose can share a network namespace through `network_mode: service:NAME` within one project.
+The default exec service is the workspace. SSH targets and snapshots are not supported for this provider.
+
+E2B needs Node 22.19+ and `E2B_API_KEY`. It does not need local Docker.
+Set `provider` to `e2b`, then configure `e2b.template` and service commands in `agent-env.json`.
+Do not set Docker images or volumes on E2B services.
+The provider maps private HTTP and WebSocket ingress to localhost. Raw TCP is unsupported.
+`down` pauses the sandbox. `up NAME` resumes it. `rm NAME --purge` destroys it.
+The E2B lease defaults to 300 seconds and does not extend with activity. Set `e2b.timeoutSeconds` for the expected session duration.
+Read the [E2B guide](https://github.com/desplega-ai/agent-env/blob/master/docs/e2b.md) before creating billed sandboxes.
+
+Project `commands` define explicit operations such as install, migrate, seed, test, or reset.
+Inspect their definitions before execution. Reset commands can delete application data.
+
+```sh
+agent-env run app install
+agent-env run app migrate
+agent-env run app test -- --runInBand
+```
+
+Argument arrays receive extra arguments directly. Shell strings receive them through `"$@"`.
+Commands use the configured service or the default workspace service. Use `--service` to override it.
+After editing command definitions, use `up --name NAME` to refresh the saved commands.
+Long commands do not block status, logs, source sync, or other instances. Output arrives when each command finishes.
+
+Local Docker and Dev Containers mount source files. SSH and E2B automatically synchronize source changes.
+An application watcher must reload changed code. Source synchronization alone does not restart an application.
+Use `--no-watch` for manual synchronization through `sync NAME`.
+Environment files and dependency directories do not synchronize.
 
 ## Dotenv and private values
 

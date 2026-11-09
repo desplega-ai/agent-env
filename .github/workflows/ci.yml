@@ -101,7 +101,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [docker, compose, ssh, s3]
+        group: [docker, compose, devcontainer, ssh, s3]
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:

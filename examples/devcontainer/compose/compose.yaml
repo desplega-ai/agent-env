@@ -1,0 +1,11 @@
+services:
+  workspace:
+    image: node:22-bookworm-slim
+    command: sleep infinity
+    volumes:
+      - ..:/workspaces/devcontainer
+      - data:/data
+    ports:
+      - "3000:3000"
+volumes:
+  data: {}

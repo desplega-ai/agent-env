@@ -7,6 +7,7 @@ import { home } from '../paths.mjs';
 import { run } from '../system.mjs';
 import { shouldSync } from '../source-paths.mjs';
 import { checkDocker } from '../prerequisites.mjs';
+import { routeProtocol } from '../route-protocol.mjs';
 
 export async function detectComposeFiles(cwd) {
   for (const name of ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml']) {
@@ -113,9 +114,7 @@ export function composeServiceMetadata(model, compose = {}) {
       consumed.add(alias);
       const port = Number(route.port ?? published.published);
       if (!port) throw new Error(`Define a public port in compose.routes for ${name}:${target}.`);
-      const appProtocol = published.app_protocol;
-      const protocol = route.protocol ?? (appProtocol === 'http' || [80, 3000, 4173, 4200, 4321, 5000, 5173, 8000, 8080, 8081, 8888, 9000].includes(target) ? 'http' : 'tcp');
-      if (appProtocol && !['http', 'tcp'].includes(appProtocol) && !route.protocol) throw new Error(`Set an explicit route protocol for ${name}:${target}.`);
+      const protocol = routeProtocol(target, route.protocol, published.app_protocol);
       services[alias] = { composeService: name, containerPort: target, port, protocol, transport: 'tcp' };
     }
   }

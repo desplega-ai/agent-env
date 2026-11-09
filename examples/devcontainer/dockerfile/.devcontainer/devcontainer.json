@@ -1,0 +1,8 @@
+{
+  "build": { "dockerfile": "Dockerfile" },
+  "workspaceMount": "type=bind,source=${localWorkspaceFolder}/..,target=/workspaces/devcontainer",
+  "workspaceFolder": "/workspaces/devcontainer/dockerfile",
+  "remoteUser": "node",
+  "forwardPorts": [3000],
+  "postStartCommand": "node ../server.mjs >/tmp/example-server.log 2>&1 &"
+}

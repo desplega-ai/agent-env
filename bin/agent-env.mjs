@@ -30,15 +30,16 @@ const help = `agent-env: development services with stable localhost addresses
   agent-env use NAME                   Select NAME for bare localhost
   agent-env logs NAME [--service web]  Read recent service logs
   agent-env exec NAME [--service db] -- COMMAND [ARGS...]
-  agent-env sync NAME                  Copy local changes to an SSH host
+  agent-env run NAME COMMAND [-- ARGS...] Run a named project command
+  agent-env sync NAME                  Copy local changes to SSH or E2B
   agent-env env set KEY [--from-env VAR] Store a secret from stdin or a variable
   agent-env env list | unset KEY       Manage secret names for --env NAME
   agent-env snapshot NAME LOCATION     Save stopped volumes locally or to S3
   agent-env restore LOCATION --name NAME  Restore into a new instance
-  agent-env down NAME | --all          Stop containers and retain data
+  agent-env down NAME | --all          Stop services and retain data
   agent-env fork SOURCE DEST [--worktree PATH]  Fork stopped data and optional source files
-  agent-env rm NAME [--purge]          Remove containers, optionally data
-  agent-env daemon stop               Stop routing and retain containers
+  agent-env rm NAME [--purge]          Remove instances, optionally data
+  agent-env daemon stop               Stop routing and retain services
 
 Options:
   --name NAME, --port PORT, --image IMAGE, --config FILE, --service NAME, --json
@@ -53,10 +54,11 @@ Options:
   --endpoint URL, --omit-mounts, --all, --purge
   --remove-worktree, --discard-worktree (requires --remove-worktree)
 
-Requires Node 22+ and Docker. SSH targets require Docker, rsync, and Bash.
+Requires Node 22.19+. Docker and Dev Containers require a Docker engine.
+SSH targets require Docker, rsync, and Bash. E2B requires E2B_API_KEY.
 HTTP supports named hosts and WebSockets. TCP uses the selected instance.
 `;
-function request(message, timeout = message.type === 'resume' ? (message.startupTimeoutSeconds ?? 3600) * 1000 + 120000 : Math.max(600000, (message.spec?.startupTimeoutSeconds ?? 0) * 1000 + 120000)) {
+function request(message, timeout = ['run', 'exec'].includes(message.type) ? 0 : message.type === 'resume' ? (message.startupTimeoutSeconds ?? 3600) * 1000 + 120000 : Math.max(600000, (message.spec?.startupTimeoutSeconds ?? 0) * 1000 + 120000)) {
   return new Promise((resolve, reject) => {
     const req = http.request({ socketPath, path: '/', method: 'POST', headers: { 'content-type': 'application/json' } }, async response => {
       try {
@@ -180,10 +182,11 @@ async function main() {
     }
     throw new Error('The daemon is still stopping. Wait for the current operation to finish.');
   }
-  if (!['up', 'list', 'use', 'logs', 'exec', 'sync', 'down', 'rm', 'fork', 'ui', 'https', 'snapshot', 'restore'].includes(type)) throw new Error(`Unknown command: ${type}. Run agent-env --help.`);
+  if (!['up', 'list', 'use', 'logs', 'exec', 'run', 'sync', 'down', 'rm', 'fork', 'ui', 'https', 'snapshot', 'restore'].includes(type)) throw new Error(`Unknown command: ${type}. Run agent-env --help.`);
   if (!['up', 'list', 'ui', 'https', 'restore'].includes(type) && !name && !(values.all && ['down', 'rm'].includes(type))) throw new Error(`Specify an instance name for ${type}.`);
   if (['fork', 'snapshot'].includes(type) && !destination) throw new Error('Specify a destination name.');
   if (type === 'exec' && !command.length) throw new Error('Specify a command after --.');
+  if (type === 'run' && (!destination || positionals.length > 3)) throw new Error('Use run NAME COMMAND with optional arguments after --.');
   if (type === 'restore' && !name) throw new Error('Specify a snapshot directory or S3 URL.');
   if (values['discard-worktree'] && !values['remove-worktree']) throw new Error('Use --discard-worktree with --remove-worktree.');
   const message = { type, name, destination, service: values.service, command, all: values.all, purge: values.purge, worktree: values.worktree ? resolve(values.worktree) : undefined, branch: values.branch, ref: values.ref, endpoint: values.endpoint, removeWorktree: values['remove-worktree'], discardWorktree: values['discard-worktree'], omitMounts: values['omit-mounts'] };

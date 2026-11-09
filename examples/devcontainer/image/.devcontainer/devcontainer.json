@@ -1,0 +1,9 @@
+{
+  // The provider preserves comments and the trailing comma in this source.
+  "image": "node:22-bookworm-slim",
+  "workspaceMount": "type=bind,source=${localWorkspaceFolder}/..,target=/workspaces/devcontainer",
+  "workspaceFolder": "/workspaces/devcontainer/image",
+  "remoteUser": "node",
+  "forwardPorts": [3000],
+  "postStartCommand": "node ../server.mjs >/tmp/example-server.log 2>&1 &",
+}
