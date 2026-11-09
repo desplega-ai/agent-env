@@ -52,7 +52,20 @@ export async function fixture(suite) {
     const pid = await ping(socketPath);
     assert.ok(Number.isInteger(pid) && pid > 1 && pid !== process.pid);
     const owners = await run('lsof', ['-nP', '-a', '-U', '-FpcfintT', '-Ts', '--', socketPath]);
-    const pids = [...new Set(owners.split('\n').filter(line => /^p\d+$/.test(line)).map(line => Number(line.slice(1))))];
+    const socketNames = new Set([socketPath, await realpath(socketPath)]);
+    const listeners = new Set();
+    // Linux lsof can also return an unrelated SSH control socket for this path.
+    // Match each descriptor's name and state before counting its process.
+    for (const record of owners.split(/(?=^p\d+$)/m)) {
+      const processId = Number(/^p(\d+)/.exec(record)?.[1]);
+      if (!Number.isInteger(processId)) continue;
+      for (const descriptor of record.split(/(?=^f)/m).slice(1)) {
+        const name = /^n(.*)$/m.exec(descriptor)?.[1];
+        const matches = [...socketNames].some(path => name === path || name?.startsWith(`${path} type=`));
+        if (matches && (process.platform !== 'linux' || /^TST=LISTEN$/m.test(descriptor))) listeners.add(processId);
+      }
+    }
+    const pids = [...listeners];
     let diagnostics = '';
     if (pids.length !== 1 || pids[0] !== pid) {
       diagnostics = (await subprocess('ps', ['-p', pids.join(','), '-o', 'pid=,ppid=,stat=,comm='])).stdout;
