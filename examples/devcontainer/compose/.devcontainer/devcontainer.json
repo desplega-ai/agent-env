@@ -1,0 +1,8 @@
+{
+  "dockerComposeFile": "../compose.yaml",
+  "service": "workspace",
+  "workspaceFolder": "/workspaces/devcontainer/compose",
+  "remoteUser": "node",
+  "forwardPorts": [3000],
+  "postStartCommand": "node ../server.mjs >/tmp/example-server.log 2>&1 &"
+}

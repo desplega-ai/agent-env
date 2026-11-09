@@ -62,7 +62,7 @@ export class RuntimeExtras {
   }
   watch(handle) {
     this.unwatch(handle.spec.name);
-    if (!handle.spec.host || handle.spec.watch === false || !handle.running) return;
+    if ((!handle.spec.host && handle.spec.provider !== 'e2b') || handle.spec.watch === false || !handle.running) return;
     const name = handle.spec.name;
     try {
       this.watchers.set(name, watchSource(handle.spec.cwd, {

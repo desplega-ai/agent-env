@@ -3,6 +3,7 @@ import { basename, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { discoverEnvironmentFiles, loadEnvironment, resolveEnvironment, stringList } from './environments.mjs';
 import { cloudOptions } from './cloud.mjs';
+import { validateCommands } from './commands.mjs';
 
 export const hash = value => createHash('sha256').update(value).digest('hex').slice(0, 8);
 export function validName(value) {
@@ -15,16 +16,17 @@ export function validate(spec) {
     throw new Error('Set the startup timeout to an integer from 1 to 3600 seconds.');
   }
   if (typeof spec.provider !== 'string' || !spec.provider) throw new Error('Specify a provider name.');
+  validateCommands(spec);
   if (spec.host && !/^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$/.test(spec.host)) throw new Error('Use an SSH alias or user@host. Configure ports and keys in SSH config.');
-  if (spec.provider === 'compose') {
-    if (!spec.compose || !stringList(spec.compose.files, 'compose-file').length) throw new Error('Specify at least one Compose file.');
-    if (!spec.services || !Object.keys(spec.services).length) throw new Error('Enable at least one Compose service.');
+  if (['compose', 'devcontainer'].includes(spec.provider)) {
+    if (spec.provider === 'compose' && (!spec.compose || !stringList(spec.compose.files, 'compose-file').length)) throw new Error('Specify at least one Compose file.');
+    if (!spec.services || !Object.keys(spec.services).length) throw new Error('Enable at least one service.');
     const ports = new Set();
     for (const [name, service] of Object.entries(spec.services)) {
-      if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name) || !service.composeService) throw new Error('Compose services require valid names and source service metadata.');
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name) || !(service.composeService || service.devcontainerService)) throw new Error('Services require valid names and source service metadata.');
       if (service.internal) continue;
       validName(name);
-      if (!Number.isInteger(service.port) || service.port < 1 || service.port > 65535) throw new Error('Compose public ports must be integers between 1 and 65535.');
+      if (!Number.isInteger(service.port) || service.port < 1 || service.port > 65535) throw new Error('Public ports must be integers between 1 and 65535.');
       if (!Number.isInteger(service.containerPort) || service.containerPort < 1 || service.containerPort > 65535) throw new Error('Container ports must be integers between 1 and 65535.');
       if (!['http', 'tcp'].includes(service.protocol)) throw new Error('The protocol must be http or tcp.');
       if (ports.has(service.port)) throw new Error(`Port ${service.port} appears more than once in this stack.`);
@@ -36,7 +38,7 @@ export function validate(spec) {
   const ports = new Set();
   for (const [name, service] of Object.entries(spec.services)) {
     validName(name);
-    if (!service.image || typeof service.image !== 'string') throw new Error(`Set an image for ${name}.`);
+    if (spec.provider !== 'e2b' && (!service.image || typeof service.image !== 'string')) throw new Error(`Set an image for ${name}.`);
     service.containerPort ??= service.port;
     service.protocol ??= 'http';
     if (!Number.isInteger(service.port) || service.port < 1024 || service.port > 65535) throw new Error('Public ports must be integers between 1024 and 65535.');
@@ -77,6 +79,7 @@ export async function loadSpec(options = {}, command = []) {
   }
   const environmentName = config.environments?.[environment]?.name;
   config = resolveEnvironment(config, environment);
+  if (config.e2b && Object.hasOwn(config.e2b, 'credentials')) throw new Error('Do not put E2B credentials in agent-env.json. Use E2B_API_KEY in the shell, an env file, or the private store.');
   const base = basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, environment === 'default' ? 30 : 24);
   const suffix = environment === 'default' ? '' : `-${hash(environment)}`;
   const configuredName = environmentName ?? (config.name ? environment === 'default' ? config.name : `${config.name.slice(0, 39)}${suffix}` : undefined);
@@ -105,9 +108,16 @@ export async function loadSpec(options = {}, command = []) {
   // These values remain in memory and private daemon state. Initialization never writes them.
   spec.sensitiveValues = [];
   const { detectComposeFiles, resolveComposeSpec } = await import('./providers/compose.mjs');
+  const { detectDevcontainerConfig, resolveDevcontainerSpec } = await import('./providers/devcontainer.mjs');
   const composeFiles = stringList(options['compose-file'] ?? config.compose?.files ?? config.composeFiles, 'compose-file');
   const detected = !config.provider && !config.services && !command.length ? await detectComposeFiles(cwd) : [];
-  if (!command.length && (spec.provider === 'compose' || composeFiles.length || detected.length)) {
+  const devcontainer = !config.provider && !config.compose && !config.services && !composeFiles.length && !detected.length && !command.length ? await detectDevcontainerConfig(cwd) : undefined;
+  if (spec.provider === 'devcontainer' || devcontainer) {
+    if (command.length || config.services || composeFiles.length || options.profile) throw new Error('Use native Dev Container configuration for services and startup commands.');
+    spec.env = await loadEnvironment({ cwd, environment, files: spec.envFiles, values: config.env, sensitiveValues: spec.sensitiveValues });
+    return validate(await resolveDevcontainerSpec({ ...spec, provider: 'devcontainer' }));
+  }
+  if (!command.length && (spec.provider === 'compose' || !config.provider && config.compose || composeFiles.length || detected.length)) {
     if (config.services) throw new Error('Use Compose override files for service configuration. Use env and compose.routes in agent-env.json.');
     spec.provider = 'compose';
     // Compose resolves dotenv interpolation. Only explicit values override its environment.
@@ -122,12 +132,18 @@ export async function loadSpec(options = {}, command = []) {
   if (options.profile !== undefined || composeFiles.length) throw new Error('Compose profiles and files require the Compose provider without a command override.');
   spec.env = await loadEnvironment({ cwd, environment, files: spec.envFiles, values: config.env, sensitiveValues: spec.sensitiveValues });
   if (command.length) {
-    spec.provider = 'docker';
-    spec.services = { web: { image: options.image ?? 'node:22-bookworm-slim', port: Number(options.port ?? 3000), command: command.map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' '), volumes: { dependencies: '/workspace/node_modules', cache: '/root/.npm' } } };
+    spec.provider = config.provider === 'e2b' ? 'e2b' : 'docker';
+    if (spec.provider === 'e2b' && options.image) throw new Error('E2B uses e2b.template instead of a service image.');
+    spec.services = { web: { ...(spec.provider === 'e2b' ? {} : { image: options.image ?? 'node:22-bookworm-slim', volumes: { dependencies: '/workspace/node_modules', cache: '/root/.npm' } }),
+      port: Number(options.port ?? 3000), command: command.map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' ') } };
   }
   for (const service of Object.values(spec.services ?? {})) {
     service.env = { ...spec.env, ...await loadEnvironment({ cwd, environment, values: service.env, includeStored: false, sensitiveValues: spec.sensitiveValues }) };
   }
   spec.sensitiveValues = [...new Set(spec.sensitiveValues)].sort();
+  if (spec.provider === 'e2b') {
+    const { resolveE2BSpec } = await import('./providers/e2b.mjs');
+    return validate(resolveE2BSpec(spec));
+  }
   return validate(spec);
 }

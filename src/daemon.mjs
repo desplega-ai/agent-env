@@ -14,6 +14,7 @@ import { prepareCloud, sleepCloud, destroyCloud, commitCloud, disposeFailedCloud
 import { createProxy, createTcpProxy } from './proxy.mjs';
 import { cloudPeers, cloudCanSleep, maintainInstances, expireCloudMachine } from './maintenance.mjs';
 import { checkLocalRuntime } from './prerequisites.mjs';
+import { projectCommand } from './commands.mjs';
 
 await mkdir(home, { recursive: true, mode: 0o700 });
 await chmod(home, 0o700);
@@ -27,6 +28,7 @@ const owner = state.owner ?? hash(`${hostname()}:${home}`);
 state.owner = owner;
 const syncPending = new Set();
 const retries = new Map();
+const activeCommands = new Map();
 function activity(name) { if (state.instances[name]) state.instances[name].lastActivity = Date.now(); }
 const extras = new RuntimeExtras({
   instances: () => state.instances, connections: () => connections, activity,
@@ -123,12 +125,14 @@ function summary(handle) {
   const connected = connections.has(name) && connections.get(name).every(item => !item.child || (item.child.exitCode === null && item.child.signalCode === null && !item.child.killed));
   return {
     worktree: handle.worktree?.cwd,
-    name, provider: handle.spec.provider, host: handle.spec.host ?? 'local', running: handle.running, connected,
+    name, provider: handle.spec.provider, host: handle.spec.host ?? (handle.spec.provider === 'e2b' ? 'e2b' : 'local'), running: handle.running, connected,
+    commands: Object.keys(handle.spec.commands ?? {}),
     environment: handle.spec.environment ?? handle.spec.environmentName,
-    sync: handle.spec.host ? handle.syncError ?? (handle.spec.watch === false ? 'manual' : 'watching') : 'local files',
+    sync: handle.spec.host || handle.spec.provider === 'e2b' ? handle.syncError ?? (handle.spec.watch === false ? 'manual' : 'watching') : 'local files',
     cloud: handle.spec.cloud ? { serverId: handle.spec.cloud.serverId, expiresAt: handle.spec.cloud.expiresAt, sleeping: !!handle.sleeping } : undefined,
     error: redact(handle, errors.get(name)),
     services: Object.fromEntries(Object.entries(handle.services).map(([key, service]) => [key, {
+      internal: !!service.internal,
       port: service.port, protocol: service.protocol,
       httpsUrl: service.protocol === 'http' && service.port ? extras.httpsUrl(name, key, primary) : undefined,
       url: !service.port ? null : service.protocol === 'http' ? `http://${name}.localhost:${service.port}` : `tcp://localhost:${service.port}`,
@@ -178,6 +182,7 @@ async function action(message) {
     const identitySpec = (value, omitEnvironment = false) => {
       const copy = structuredClone(value);
       delete copy.startupTimeoutSeconds;
+      delete copy.commands;
       if (omitEnvironment) {
         delete copy.env; delete copy.envFiles; delete copy.envFile; delete copy.sensitiveValues;
         for (const service of Object.values(copy.services ?? {})) delete service.env;
@@ -194,9 +199,9 @@ async function action(message) {
       return copy;
     };
     const changed = handle && !handle.removed && !isDeepStrictEqual(identitySpec(handle.spec), identitySpec(spec));
-    const canRecreate = provider.docker || (spec.provider === 'sandbox' && spec.sandbox?.adapter === 'docker');
+    const canRecreate = provider.docker || spec.provider === 'e2b' || (spec.provider === 'sandbox' && spec.sandbox?.adapter === 'docker');
     if (changed && (!canRecreate || !isDeepStrictEqual(identitySpec(handle.spec, true), identitySpec(spec, true)))) {
-      throw new Error(`Configuration changed for ${spec.name}. Run agent-env rm ${spec.name}, then up. Volumes remain.`);
+      throw new Error(`Configuration changed for ${spec.name}. Run agent-env rm ${spec.name}, then up. Data remains.`);
     }
     try {
       await reserve(spec);
@@ -322,12 +327,12 @@ async function action(message) {
         delete handle.worktree;
       }
       if (type === 'rm') {
-        if (cloud && !message.purge) handle.removed = true;
+        if ((cloud || handle.spec.provider === 'e2b') && !message.purge) handle.removed = true;
         else delete state.instances[handle.spec.name];
       }
       await save();
     }
-    return { message: type === 'rm' ? (handles.some(handle => handle.removed) ? 'Containers removed. Cloud data remains. Use rm --purge to delete the machine and data.' : 'Instances removed.') : 'Instances stopped. Data remains.' };
+    return { message: type === 'rm' ? (handles.some(handle => handle.removed) ? 'Instance data remains. Use rm --purge to delete retained compute and data.' : 'Instances removed.') : 'Instances stopped. Data remains.' };
   }
   if (type === 'snapshot') {
     const source = instance(name);
@@ -342,6 +347,7 @@ async function action(message) {
   }
   if (type === 'fork') {
     const source = instance(name);
+    if (['e2b', 'devcontainer'].includes(source.spec.provider)) throw new Error(`Provider ${source.spec.provider} does not support forks.`);
     const destination = validName(message.destination);
     if (Object.hasOwn(state.instances, destination)) throw new Error('The destination instance already exists.');
     if (source.running || source.removed) throw new Error('Stop the source before a fork. The source containers must still exist.');
@@ -387,21 +393,42 @@ async function action(message) {
       throw error;
     } finally { if (temporary) await rm(temporary, { recursive: true, force: true }); }
   }
-  if (['logs', 'exec', 'sync'].includes(type)) {
+  if (['logs', 'sync'].includes(type)) {
     const handle = instance(name);
     const provider = providerFor(handle.spec);
     activity(name);
     if (handle.sleeping) throw new Error('The cloud machine is sleeping. Run agent-env up first.');
     if (type === 'sync') { await provider.sync(handle); return { message: 'Files synchronized.' }; }
-    const service = message.service ?? Object.keys(handle.services)[0];
+    const service = message.service ?? handle.primaryService ?? Object.keys(handle.services)[0];
     if (!handle.services[service]) throw new Error(`Service ${service} does not exist.`);
-    const output = type === 'logs' ? await provider.logs(handle, service) : await provider.exec(handle, service, message.command);
+    const output = await provider.logs(handle, service);
     return { output: redact(handle, output) };
   }
   throw new Error(`Unknown action: ${type}.`);
 }
 let queue = Promise.resolve();
 function enqueue(work) { const pending = queue.then(work); queue = pending.catch(() => {}); return pending; }
+function prepareExecution(message) {
+  const source = instance(message.name);
+  if (!source.running || source.removed || source.sleeping) throw new Error('Start the instance before running a command.');
+  // Capture configuration and redaction values before a concurrent lifecycle change.
+  const handle = structuredClone(source);
+  const provider = providerFor(handle.spec);
+  const command = message.type === 'run' ? projectCommand(handle, message.destination, message.service, message.command)
+    : { service: message.service ?? handle.primaryService ?? Object.keys(handle.services)[0], argv: message.command };
+  if (!handle.services[command.service]) throw new Error(`Service ${command.service} does not exist.`);
+  activeCommands.set(source, (activeCommands.get(source) ?? 0) + 1);
+  activity(message.name);
+  return async () => {
+    try { return { output: redact(handle, await provider.exec(handle, command.service, command.argv)) }; }
+    catch (error) { error.message = redact(handle, error.message); throw error; }
+    finally {
+      const count = activeCommands.get(source) - 1;
+      if (count) activeCommands.set(source, count); else activeCommands.delete(source);
+      if (state.instances[message.name] === source) activity(message.name);
+    }
+  };
+}
 let shuttingDown = false;
 const control = http.createServer(async (request, response) => {
   let commandMessage;
@@ -421,7 +448,10 @@ const control = http.createServer(async (request, response) => {
       queue = queue.then(async () => { await shutdown(); });
     } else {
       if (shuttingDown) throw new Error('The daemon is stopping.');
-      result = await enqueue(() => action(message));
+      if (['run', 'exec'].includes(message.type)) {
+        const execute = await enqueue(() => prepareExecution(message));
+        result = await execute();
+      } else result = await enqueue(() => action(message));
     }
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify(result));
@@ -471,6 +501,7 @@ queue = (async () => {
 let maintaining = false;
 const maintenance = setInterval(() => {
   if (shuttingDown || maintaining) return;
+  for (const handle of activeCommands.keys()) if (state.instances[handle.spec.name] === handle) activity(handle.spec.name);
   maintaining = true;
   enqueue(() => maintainInstances({
     instances: state.instances, action, retries, errors, connected: handle => summary(handle).connected,

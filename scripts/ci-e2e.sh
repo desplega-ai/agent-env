@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 tarball=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-group=${2:?Specify core, docker, compose, ssh, s3, or cloud.}
-case "$group" in core|docker|compose|ssh|s3|cloud) ;; *) echo 'Unknown E2E group.' >&2; exit 1;; esac
+group=${2:?Specify core, docker, compose, devcontainer, ssh, s3, or cloud.}
+case "$group" in core|docker|compose|devcontainer|ssh|s3|cloud) ;; *) echo 'Unknown E2E group.' >&2; exit 1;; esac
 if [[ "$group" == cloud && "${AGENT_ENV_TEST_CLOUD:-}" != 1 ]]; then
   echo 'Set AGENT_ENV_TEST_CLOUD=1 to authorize billed cloud tests.' >&2
   exit 1

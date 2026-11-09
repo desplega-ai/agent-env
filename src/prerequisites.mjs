@@ -22,7 +22,7 @@ export async function checkDocker({ compose = false, engine = false } = {}) {
 
 export async function checkLocalRuntime(spec) {
   if (spec.host || spec.cloud) return;
-  if (['docker', 'compose'].includes(spec.provider) || spec.provider === 'sandbox' && spec.sandbox?.adapter === 'docker') {
-    await checkDocker({ compose: spec.provider === 'compose', engine: true });
+  if (['docker', 'compose', 'devcontainer'].includes(spec.provider) || spec.provider === 'sandbox' && spec.sandbox?.adapter === 'docker') {
+    await checkDocker({ compose: spec.provider === 'compose' || !!spec.devcontainer?.configuration?.dockerComposeFile, engine: true });
   }
 }
