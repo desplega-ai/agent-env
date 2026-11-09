@@ -84,6 +84,8 @@ console.log(instances);
 ```
 
 See the [SDK guide](docs/sdk.md) for lifecycle methods, errors, isolation, and a complete CI example.
+The [agent-fs acceptance workflow](docs/agent-fs.md) runs a real Compose stack through the installed SDK.
+It verifies authentication, source updates, file versions, persistence after restart, and cleanup.
 
 ## Local and remote
 
@@ -316,13 +318,18 @@ Named volumes retain dependencies and package caches. Docker retains build and i
 Authenticate the installed `hcloud` CLI, then run:
 
 ```sh
-agent-env up --name cloud --cloud hetzner --location hel1
+agent-env up --name cloud --cloud hetzner --cloud-type cpx22 --location hel1
 agent-env down cloud
 agent-env up cloud
 agent-env rm cloud --purge
 ```
 
 The CLI provisions Docker and Compose, generates dedicated SSH credentials, and pins the host identity before connecting.
+New allocations check live availability before creating keys or IPs.
+Rejected selections show available alternatives with architecture, live prices, currency, VAT basis, and separate IPv4 cost.
+Select a type and location explicitly. The CLI never substitutes a machine.
+Defaults remain `cx23` and `fsn1`. Availability can change, including for the example above.
+See [Hetzner setup and diagnostics](docs/hetzner.md) for errors and preflight tests with explicit billing authorization.
 Ownership records and labels protect unrelated machines, keys, and IP addresses.
 Each record also binds to the active hcloud context, API endpoint, and a fingerprint of its credential.
 Changed settings stop cloud operations before resource access. Local keys and ownership records remain available for recovery.

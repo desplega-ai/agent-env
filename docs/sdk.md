@@ -262,6 +262,8 @@ The suite tests lifecycle operations, command arguments, failures, redaction, la
 It removes only its own instances and temporary installation.
 It removes its temporary package archive after verification.
 Set `AGENT_ENV_SDK_TARBALL` to test an existing package archive instead.
+The [agent-fs acceptance workflow](agent-fs.md) verifies a real application through the SDK.
+It covers authenticated file operations, live source updates, S3 version history, persistence, and purge.
 If `AGENT_ENV_CLI` is set, also supply its package archive through `AGENT_ENV_SDK_TARBALL`.
 The SDK suite refuses to substitute a fresh checkout archive for a separately installed CLI.
 The suite needs the pinned TypeScript development dependency from this checkout.

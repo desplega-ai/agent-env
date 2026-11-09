@@ -1,0 +1,72 @@
+x-workspace: &workspace
+  - .:/workspace
+  - dependencies:/workspace/node_modules
+  - core-dependencies:/workspace/packages/core/node_modules
+  - cli-dependencies:/workspace/packages/cli/node_modules
+  - mcp-dependencies:/workspace/packages/mcp/node_modules
+  - server-dependencies:/workspace/packages/server/node_modules
+  - bash-dependencies:/workspace/packages/just-bash/node_modules
+  - fuse-x64-dependencies:/workspace/packages/fuse-helper-linux-x64/node_modules
+  - fuse-arm64-dependencies:/workspace/packages/fuse-helper-linux-arm64/node_modules
+  - metadata:/data
+
+x-storage: &storage
+  S3_ENDPOINT: http://minio:9000
+  S3_BUCKET: agentfs
+  S3_ACCESS_KEY_ID: ${AGENT_FS_TEST_ACCESS_KEY:?Generate a fixture access key}
+  S3_SECRET_ACCESS_KEY: ${AGENT_FS_TEST_SECRET_KEY:?Generate a fixture secret key}
+  S3_REGION: us-east-1
+
+services:
+  minio:
+    image: ghcr.io/coollabsio/minio@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${AGENT_FS_TEST_ACCESS_KEY:?Generate a fixture access key}
+      MINIO_ROOT_PASSWORD: ${AGENT_FS_TEST_SECRET_KEY:?Generate a fixture secret key}
+    volumes: ["objects:/data"]
+  setup:
+    image: oven/bun:1.4.4
+    working_dir: /workspace
+    command: ["sh", "-c", "bun --no-env-file install --frozen-lockfile --ignore-scripts && bun --no-env-file packages/core/agent-env-checks.mjs init"]
+    depends_on: [minio]
+    environment: *storage
+    volumes: *workspace
+  agent-fs:
+    image: oven/bun:1.4.4
+    working_dir: /workspace
+    command: ["bun", "--no-env-file", "--watch", "packages/cli/src/index.ts", "server"]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      <<: *storage
+      AGENT_FS_HOME: /data
+      AGENT_FS_STORAGE_PROVIDER: minio
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "7433"
+      AGENT_FS_APP_URL: http://127.0.0.1:7433
+      AGENT_FS_REGISTER_ALLOWED_DOMAINS: acceptance.invalid
+      EMBEDDING_PROVIDER: openai
+      EMBEDDING_API_KEY: ""
+      ANONYMIZED_TELEMETRY: "false"
+      DO_NOT_TRACK: "1"
+    volumes: *workspace
+    ports: ["127.0.0.1:${AGENT_FS_TEST_PORT:-7433}:7433"]
+    healthcheck:
+      test: ["CMD", "bun", "--no-env-file", "-e", "fetch('http://127.0.0.1:7433/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+volumes:
+  objects: {}
+  metadata: {}
+  dependencies: {}
+  core-dependencies: {}
+  cli-dependencies: {}
+  mcp-dependencies: {}
+  server-dependencies: {}
+  bash-dependencies: {}
+  fuse-x64-dependencies: {}
+  fuse-arm64-dependencies: {}

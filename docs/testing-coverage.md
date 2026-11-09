@@ -5,9 +5,9 @@ Subject: agent-env 0.5.0, commit `1e5f1d4` (master). CI published this commit.
 Scope: released code only. See section 9 for the storage profile work in progress.
 No test ran for this audit. No paid resource was used. No source, test, or CI file changed.
 
-## Follow-up implementation, not yet released
+## Follow-up implementation in 0.6.0
 
-The original audit below describes release 0.5.0. This section records subsequent work on `feat/storage-profiles`.
+The original audit below describes release 0.5.0. This section records the subsequent work published in 0.6.0.
 
 - `daemon.e2e.mjs` now covers concurrent daemon startup, one socket owner, human output, standalone HTTPS, and dashboard HTTP behavior.
   It passed through an installed package and is registered in the core group.
@@ -83,6 +83,22 @@ Untagged build results remain outside the runtime cleanup contract, like other D
 
 The updated installed package passed all seven recovery and 16 lifecycle scenarios in an isolated Linux Docker 28.0.4 engine with Compose 2.38.2.
 The isolated Agent Swarm example also passed startup, authentication, routing, and persistence after restart with the startup change.
+
+## Follow-up verification for 0.6.1, 2026-11-09 BCN
+
+The new opt-in `agent-fs` group supplements the historical audit below.
+It runs the installed SDK against a committed source export and a real Compose stack.
+Checks cover authentication, CLI file operations, live source edits, authenticated S3 versions, restart persistence, and purge.
+The parent integration passed through `npm run test:agent-fs` against agent-fs commit `4c630a31f610119554ee79fee927f21ca2f13991`.
+See [the guide](agent-fs.md) for commands and coverage limits.
+
+The combined 0.6.1 archive passed core, live Hetzner preflight, and agent-fs acceptance on 2026-11-09 BCN.
+The isolated Agent Swarm example also passed authentication, routing, and KV persistence after restart.
+Its source revision was `366dfa9fa414712f846ab0f768ccd0ea957e496c`.
+Both application checks removed their owned resources and left the original source checkouts unchanged.
+The implementation's real cloud suite passed numeric IDs, credential binding, source synchronization, forks, resume, and expiry of sleeping peers.
+It created one cpx22 machine in hel1 and verified removal of the server, IPv4, and SSH key.
+Actual capacity withdrawal during resume, a forced allocation race, and a pricing outage remain untested.
 
 ## 1. Short answer for Taras
 
