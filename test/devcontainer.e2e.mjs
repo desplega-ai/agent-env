@@ -46,7 +46,7 @@ try {
   await docker(['info', '--format', '{{.ServerVersion}}']);
   await docker(['compose', 'version']);
   const base = {
-    image: 'node:22-bookworm-slim', remoteUser: 'node', updateRemoteUserUID: false,
+    image: 'node:22-bookworm-slim', remoteUser: 'node',
     forwardPorts: [port], remoteEnv: { E2E_REMOTE: 'native-environment' },
     portsAttributes: { [port]: { protocol: 'http' } },
     mounts: ['type=volume,source=shared-source-name,target=/data'],
