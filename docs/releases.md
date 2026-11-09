@@ -7,7 +7,7 @@ The npm package is `@desplega.ai/agent-env`.
 
 `.github/workflows/ci.yml` runs for every pull request and every push to `master`.
 Public forks need no secrets. Ordinary CI never creates paid cloud resources.
-CI uses public CLI E2E tests. It does not run unit tests.
+CI uses public CLI and SDK E2E tests. It does not run unit tests.
 
 The package job creates one tarball with `npm pack --ignore-scripts`.
 `scripts/pack.mjs` audits its file list, package identity, version, and executable entry.
@@ -20,9 +20,10 @@ The `CI` job requires all these jobs to succeed:
 | Job | Runtime | Real dependencies |
 | --- | --- | --- |
 | Core | Linux and macOS, Node 22 and latest LTS | Git, npm, public skills installer, public CLI |
-| Docker | Linux, latest Node LTS | Docker, HTTP, TCP, TLS, sandbox bridge |
+| Docker | Linux, latest Node LTS | Docker, HTTP, TCP, TLS, startup recovery, anonymous-volume cleanup, sandbox bridge, public SDK and TypeScript consumer |
 | Compose | Linux, latest Node LTS | Docker Compose |
-| SSH | Linux, latest Node LTS | Dedicated localhost sshd, Docker, Compose, rsync |
+| Dev Containers | Linux, latest Node LTS | Docker, bundled Dev Containers CLI |
+| SSH | Linux, latest Node LTS | Dedicated localhost sshd, Docker, Compose, rsync, build recovery and workspace cleanup |
 | S3 | Linux, latest Node LTS | Docker Compose, AWS CLI, disposable SeaweedFS |
 
 Core tests install the bundled skill with the real skills installer into a temporary project.
@@ -44,14 +45,17 @@ The tests remove their snapshot prefixes. Cleanup removes the container and its 
 ## Runner contract
 
 The test owner maintains `test/run.mjs` and its suites.
-`npm test` runs core, Docker, and Compose E2E.
+`npm test` runs core, Docker, Compose, and Dev Container E2E.
 `npm run test:core` runs the subset that requires no Docker.
+Without `AGENT_ENV_CLI`, the runner audits and installs the checkout into a temporary prefix before testing.
+Run `npm ci --ignore-scripts` first to install development dependencies.
 CI calls the following commands through `scripts/ci-e2e.sh`:
 
 ```sh
 AGENT_ENV_CLI=/absolute/prefix/node_modules/.bin/agent-env node test/run.mjs core
-AGENT_ENV_CLI=/absolute/prefix/node_modules/.bin/agent-env node test/run.mjs docker
+AGENT_ENV_CLI=/absolute/prefix/node_modules/.bin/agent-env AGENT_ENV_SDK_TARBALL=/absolute/package.tgz node test/run.mjs docker
 AGENT_ENV_CLI=/absolute/prefix/node_modules/.bin/agent-env node test/run.mjs compose
+AGENT_ENV_CLI=/absolute/prefix/node_modules/.bin/agent-env node test/run.mjs devcontainer
 AGENT_ENV_CLI=/absolute/prefix/node_modules/.bin/agent-env node test/run.mjs ssh
 AGENT_ENV_CLI=/absolute/prefix/node_modules/.bin/agent-env node test/run.mjs s3
 AGENT_ENV_CLI=/absolute/prefix/node_modules/.bin/agent-env node test/run.mjs cloud
@@ -59,6 +63,11 @@ AGENT_ENV_CLI=/absolute/prefix/node_modules/.bin/agent-env node test/run.mjs clo
 
 All CLI invocations must use `AGENT_ENV_CLI` when CI supplies it.
 Tests must not import implementation modules or substitute Docker or SSH mocks.
+The SDK suite imports the installed public package export and invokes its bundled CLI.
+It compiles a consumer with the pinned TypeScript development dependency.
+The Docker job runs `npm ci --ignore-scripts` to install that compiler.
+`AGENT_ENV_SDK_TARBALL` selects the same audited archive for the SDK installation.
+It is required when the Docker group uses an externally installed CLI.
 Tests must create their directories beneath `TMPDIR` and remove their own resources.
 The cloud suite must preserve state if resource cleanup fails.
 
@@ -67,8 +76,8 @@ The wrapper supplies these variables:
 | Suite | Variables |
 | --- | --- |
 | All | `AGENT_ENV_CLI`, `AGENT_ENV_HOME`, `TMPDIR`, isolated npm and XDG directories |
-| Docker | `AGENT_ENV_TEST_SANDBOX=1` |
-| SSH | `AGENT_ENV_TEST_SSH=agent-env-ci`, `AGENT_ENV_TEST_SSH_CONFIG` |
+| Docker | `AGENT_ENV_TEST_SANDBOX=1`, `AGENT_ENV_SDK_TARBALL` |
+| SSH | `AGENT_ENV_TEST_SSH=agent-env-ci`, `AGENT_ENV_TEST_SSH_CONFIG`, `AGENT_ENV_TEST_RECOVERY_SSH`, `AGENT_ENV_TEST_RECOVERY_SSH_CONFIG` |
 | S3 | `AGENT_ENV_TEST_S3=s3://agent-env-ci/snapshots`, `AGENT_ENV_TEST_S3_ENDPOINT`, temporary AWS credentials |
 | Cloud | `AGENT_ENV_TEST_CLOUD=1`, `HCLOUD_TOKEN` from the protected environment |
 
@@ -198,6 +207,7 @@ The S3 fixture requires AWS CLI v2.
 
 ```sh
 work=$(mktemp -d /tmp/agent-env-package-check-XXXXXX)
+npm ci --ignore-scripts
 node scripts/pack.mjs "$work"
 tarball=$(find "$work" -name '*.tgz' -type f)
 bash scripts/ci-e2e.sh "$tarball" core

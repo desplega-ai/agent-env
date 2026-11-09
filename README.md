@@ -70,6 +70,21 @@ Open `http://demo.localhost:3300`. The example also provides Postgres on `localh
 
 For a full application, use the [Agent Swarm development example](docs/agent-swarm.md).
 
+## TypeScript SDK
+
+Use the typed SDK from JavaScript or TypeScript.
+It invokes the bundled CLI and uses the same configuration, providers, storage profiles, and state.
+
+```ts
+import { createClient } from '@desplega.ai/agent-env';
+
+const client = createClient({ cwd: process.cwd() });
+const instances = await client.list();
+console.log(instances);
+```
+
+See the [SDK guide](docs/sdk.md) for lifecycle methods, errors, isolation, and a complete CI example.
+
 ## Local and remote
 
 ```sh
@@ -366,11 +381,27 @@ Snapshots contain named volume data. Source files require Git or another backup 
 Compose anonymous volumes require a separate backup or explicit omission. Snapshot export rejects them before archive creation.
 Unsupported or shared mounts cause an error. `--omit-mounts` explicitly excludes them and reports each omission.
 
-S3 uses the installed AWS CLI and its normal credentials. `--endpoint URL` selects compatible storage.
+Configure a named backend once with the installed AWS CLI v2:
+
+```sh
+agent-env storage add backup --provider s3 --bucket my-backups --region eu-west-1 --aws-profile work
+agent-env storage check backup
+agent-env storage list
+agent-env snapshot app storage://backup/checkpoint-001
+agent-env restore storage://backup/checkpoint-001 --name restored-copy
+```
+
+User profiles reside in `$AGENT_ENV_HOME/storage.json` with private permissions.
+`--project` stores profiles under `storage` in `agent-env.json`. Project profiles replace complete user definitions.
+Credential flags accept environment variable names. Resolved credentials never enter saved runtime specifications or manifests.
+Profile edits do not change runtime identity.
+Named S3 snapshots check actual conditional-write rejection before exporting volumes.
+S3 retains the normal AWS credential chain. Legacy URLs still accept `--endpoint URL` for compatible storage.
 Each snapshot needs a new prefix. Conditional writes prevent overwrites, and the manifest uploads last.
 A failed upload can leave partial objects for manual inspection. Export uses single-object uploads, limited to 5 GB per volume on AWS S3.
 Archives require temporary local disk space. S3 stores backups, while running databases use Docker volumes.
 See [snapshot format and worktree ownership](docs/snapshots-and-worktrees.md).
+See [storage profiles](docs/storage.md) for AWS, R2, MinIO, Hetzner, generic endpoints, credentials, and compatibility requirements.
 
 ## HTTPS and status UI
 
@@ -401,6 +432,36 @@ Application pages contain no injected browser controls.
 
 ## Lifecycle and provider boundaries
 
+Docker and Compose save a resource plan before creating services.
+If the daemon stops during startup, `agent-env list --json` reports `recovery: "required"`.
+The restarted daemon preserves those resources until you choose an action:
+
+```sh
+agent-env up app              # Recover the saved startup and retain named volumes
+agent-env rm app --purge      # Remove the interrupted instance and its owned data
+```
+
+Use the saved instance name. Complete recovery before taking a snapshot or creating a fork.
+Keep the private state directory until recovery or purge succeeds.
+An allocation command can continue after the daemon stops, including during image builds or pulls.
+If the CLI reports that allocation is still running, wait for completion before retrying recovery or purge.
+If completion is uncertain, the CLI retains the record and refuses automatic recovery.
+The error includes the recovery record path. Keep that record for inspection.
+Verify that all local and remote allocation commands have stopped before you acknowledge uncertain completion:
+
+```sh
+agent-env rm app --accept-uncertain         # Remove compute and retain volumes
+agent-env up --name app                    # Recreate from the current project
+```
+
+Add `--purge` to the removal command only when you intend to delete retained data.
+The acknowledgement applies to one named instance. It still refuses active local process groups and resources with mismatched ownership.
+It cannot prove that a remote command stopped. Check the remote host before using this option after an SSH failure.
+Do not delete recovery records manually.
+Recovery refuses resources whose ownership does not match the saved plan.
+It does not adopt orphaned resources from older versions that have no saved plan.
+Interrupted imports, forks, Dev Containers, E2B, and cloud allocation do not use this recovery path.
+
 ```sh
 agent-env list
 agent-env logs app --service web
@@ -411,6 +472,9 @@ agent-env daemon stop
 ```
 
 `down` retains containers and data. `rm` removes containers and retains volumes and built images.
+Plain `rm` also retains anonymous volumes, but a new instance does not attach them automatically.
+Purge, failed-start cleanup, and interrupted-start recovery remove anonymous volumes with their containers.
+Use named volumes for data that must survive container replacement and startup recovery.
 `rm --purge` also removes managed volumes and the instance's owned Compose image tags.
 Shared base images and Docker build caches remain available.
 For a removed local instance, recreate it with `up` before purging its retained volumes.

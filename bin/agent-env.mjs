@@ -14,6 +14,7 @@ import { setEnvironmentSecret, listEnvironmentSecrets, unsetEnvironmentSecret } 
 import { delay } from '../src/system.mjs';
 import { skillCommand } from '../src/skill.mjs';
 import { checkLocalRuntime } from '../src/prerequisites.mjs';
+import { listStorage, mutateStorage, resolveStorage, storageContext, checkStorage, scrubStorage } from '../src/storage.mjs';
 
 const help = `agent-env: development services with stable localhost addresses
 
@@ -34,6 +35,8 @@ const help = `agent-env: development services with stable localhost addresses
   agent-env sync NAME                  Copy local changes to SSH or E2B
   agent-env env set KEY [--from-env VAR] Store a secret from stdin or a variable
   agent-env env list | unset KEY       Manage secret names for --env NAME
+  agent-env storage add NAME          Configure a storage profile
+  agent-env storage list | remove NAME | check NAME
   agent-env snapshot NAME LOCATION     Save stopped volumes locally or to S3
   agent-env restore LOCATION --name NAME  Restore into a new instance
   agent-env down NAME | --all          Stop services and retain data
@@ -52,6 +55,11 @@ Options:
   --https, --https-port PORT, --no-watch, --timeout SECONDS (startup, default 60)
   --worktree PATH, --branch BRANCH, --ref REF
   --endpoint URL, --omit-mounts, --all, --purge
+  --accept-uncertain                rm NAME only, after verifying allocation has stopped
+  Storage: --project, --provider s3|local, --bucket NAME, --root /absolute/path
+  --region REGION, --prefix PREFIX, --addressing-style auto|path|virtual
+  --aws-profile NAME, --access-key-env VAR, --secret-key-env VAR
+  --session-token-env VAR, --ca-bundle /absolute/path
   --remove-worktree, --discard-worktree (requires --remove-worktree)
 
 Requires Node 22.19+. Docker and Dev Containers require a Docker engine.
@@ -111,7 +119,8 @@ function display(result, json) {
   if (Array.isArray(result)) {
     if (!result.length) console.log('No instances. Run agent-env up.');
     for (const item of result) typeof item === 'string' ? console.log(item) : display(item, false);
-  } else if (result.url) console.log(result.url);
+  } else if (result.source && result.name) console.log(`${result.name} (${result.source}${result.provider ? `, ${result.provider}` : ''}): ${result.message ?? result.root ?? `s3://${result.bucket}/${result.prefix ?? ''}`}`);
+  else if (result.url) console.log(result.url);
   else if ('output' in result) console.log(result.output);
   else if (result.message) console.log(result.message);
   else if (result.name) {
@@ -124,6 +133,7 @@ function display(result, json) {
   }
   for (const mount of result.omittedMounts ?? []) console.log(`  Omitted ${mount.service}:${mount.target}: ${mount.reason}`);
   for (const path of result.omittedPaths ?? []) console.log(`  Omitted source file: ${path}`);
+  if (result.storageProfile) console.log(`  Storage profile: ${result.storageProfile.name} (${result.storageProfile.source}).`);
 }
 async function main() {
   const args = process.argv.slice(2);
@@ -139,9 +149,12 @@ async function main() {
     provider: { type: 'string' }, adapter: { type: 'string' }, env: { type: 'string' }, profile: { type: 'string', multiple: true }, 'compose-file': { type: 'string', multiple: true },
     https: { type: 'boolean' }, 'https-port': { type: 'string' }, 'no-watch': { type: 'boolean' },
     worktree: { type: 'string' }, branch: { type: 'string' }, ref: { type: 'string' }, endpoint: { type: 'string' },
+    project: { type: 'boolean' }, bucket: { type: 'string' }, root: { type: 'string' }, region: { type: 'string' }, prefix: { type: 'string' },
+    'addressing-style': { type: 'string' }, 'aws-profile': { type: 'string' }, 'access-key-env': { type: 'string' },
+    'secret-key-env': { type: 'string' }, 'session-token-env': { type: 'string' }, 'ca-bundle': { type: 'string' },
     name: { type: 'string' }, port: { type: 'string' }, image: { type: 'string' }, ssh: { type: 'string' },
     'ssh-config': { type: 'string' }, local: { type: 'boolean' }, config: { type: 'string' }, service: { type: 'string' },
-    json: { type: 'boolean' }, all: { type: 'boolean' }, purge: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
+    json: { type: 'boolean' }, all: { type: 'boolean' }, purge: { type: 'boolean' }, 'accept-uncertain': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   } });
   const [type, name, destination] = positionals;
   if (values.version) {
@@ -151,7 +164,25 @@ async function main() {
   }
   if (type === 'skill') { await skillCommand(positionals.slice(1), values, command); return; }
   if (!type || values.help || type === 'help') { console.log(help); return; }
+  if (values['accept-uncertain'] && (type !== 'rm' || !name || values.all)) throw new Error('Use --accept-uncertain only with rm and one explicit instance name.');
   if (type === 'trust') { display(await trustTls(), values.json); return; }
+  if (type === 'storage') {
+    const options = { project: values.project, config: values.config };
+    const common = ['json', 'config', 'project'];
+    const fields = ['provider', 'bucket', 'root', 'endpoint', 'region', 'prefix', 'addressing-style', 'aws-profile', 'access-key-env', 'secret-key-env', 'session-token-env', 'ca-bundle'];
+    if (command.length || positionals.length > 3 || Object.keys(values).some(key => ![...common, ...(name === 'add' ? fields : [])].includes(key))) throw new Error('Use only storage options with the storage command.');
+    if (name === 'list') {
+      if (destination) throw new Error('Use storage list without a profile name.');
+      const profiles = await listStorage(options);
+      if (!values.json && !profiles.length) console.log('No storage profiles. Use agent-env storage add NAME.');
+      else display(profiles, values.json);
+    } else if (name === 'add' || name === 'remove') display(await mutateStorage(name, destination, values, options), values.json);
+    else if (name === 'check') {
+      const storage = await resolveStorage(`storage://${destination}/check`, options);
+      display(await checkStorage(storage, await storageContext(storage)), values.json);
+    } else throw new Error('Use storage add NAME, storage list, storage remove NAME, or storage check NAME.');
+    return;
+  }
   if (type === 'add') { display(await addService(name, { config: values.config, port: values.port, environment: values.env }), values.json); return; }
   if (type === 'init') {
     const result = await initialize({ config: values.config, command, port: values.port, image: values.image });
@@ -190,10 +221,18 @@ async function main() {
   if (type === 'restore' && !name) throw new Error('Specify a snapshot directory or S3 URL.');
   if (values['discard-worktree'] && !values['remove-worktree']) throw new Error('Use --discard-worktree with --remove-worktree.');
   const message = { type, name, destination, service: values.service, command, all: values.all, purge: values.purge, worktree: values.worktree ? resolve(values.worktree) : undefined, branch: values.branch, ref: values.ref, endpoint: values.endpoint, removeWorktree: values['remove-worktree'], discardWorktree: values['discard-worktree'], omitMounts: values['omit-mounts'] };
+  if (values['accept-uncertain']) message.acceptUncertain = true;
   if (type === 'snapshot' || type === 'restore') {
     const location = type === 'snapshot' ? destination : name;
-    message.location = location.startsWith('s3://') ? location : resolve(location);
-    message.awsEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_PROFILE', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_ENDPOINT_URL_S3', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_CONFIG_FILE', 'AWS_CA_BUNDLE'].includes(key)));
+    const storage = await resolveStorage(location, { config: values.config, endpoint: values.endpoint });
+    const context = await storageContext(storage);
+    if (type === 'snapshot' && storage.name && storage.provider === 's3') await checkStorage(storage, context);
+    message.location = storage.location;
+    message.endpoint = context.endpointUrl;
+    message.region = context.region;
+    message.awsEnv = context.awsEnv;
+    message.awsConfig = context.awsConfig;
+    if (storage.name) message.storageProfile = { name: storage.name, source: storage.source };
   }
   if (type === 'https') message.port = Number(values['https-port'] ?? 8443);
   if (type === 'ui') message.port = Number(values.port ?? 4780);
@@ -214,6 +253,6 @@ async function main() {
   if (type === 'up' && values.https) {
     await request({ type: 'https', port: Number(values['https-port'] ?? 8443) });
     display((await request({ type: 'list' })).find(item => item.name === result.name), values.json);
-  } else display(result, values.json);
+  } else display(message.storageProfile ? { ...result, storageProfile: message.storageProfile } : result, values.json);
 }
-main().catch(error => { console.error(`agent-env: ${error.message}`); process.exitCode = error.exitCode ?? 1; });
+main().catch(error => { console.error(`agent-env: ${scrubStorage(error.message)}`); process.exitCode = error.exitCode ?? 1; });

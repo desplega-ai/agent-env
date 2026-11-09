@@ -16,7 +16,9 @@ const restored = await restoreSnapshot(destinationSpec, location, provider, opti
 // { location, manifest, volumes, volumeNames }
 ```
 
-`location` is a new local directory or `s3://bucket/nonempty-prefix`.
+The CLI accepts a new local directory, `s3://bucket/nonempty-prefix`, or `storage://NAME/nonempty-prefix`.
+It resolves named profiles before calling the snapshot API.
+See [storage profiles](storage.md) for configuration, credentials, compatibility checks, and vendor command examples.
 The local parent directory must exist.
 An existing local directory or nonempty S3 prefix causes export to fail.
 Restore refuses every existing destination volume, including empty volumes.
@@ -50,6 +52,9 @@ The helper accepts these options:
 | `image` | Both | Archive helper image. Default: `busybox:1.37`. |
 | `endpointUrl` | S3 operations | AWS CLI endpoint URL for compatible services. |
 | `awsCommand` | S3 operations | AWS executable path. Default: installed `aws`. |
+| `awsEnv` | S3 operations | Private AWS environment resolved by the invoking CLI. |
+| `awsConfig` | S3 operations | Private AWS configuration text. Each AWS subprocess writes and removes its own temporary file. |
+| `region` | S3 operations | Optional explicit signing region. |
 | `omitUnsupportedMounts` | Export | Explicitly omit unsupported or shared mounts. Default: reject them. |
 | `volumeNames` | Restore | Map manifest volume IDs, such as `v0`, to fresh Docker volume names. |
 | `destinationHandle` | Restore | Identify existing destination service containers for a stopped-state check. |
@@ -118,7 +123,8 @@ Restore never removes a preexisting volume or destination container.
 
 ## S3 behavior
 
-The helper uses installed AWS CLI configuration, credentials, region selection, and environment variables.
+The invoking CLI resolves AWS credentials and configuration with AWS CLI v2.
+It provides a private transport environment for each request, without inheriting AWS settings from the daemon.
 It does not accept or store AWS access keys in the manifest.
 An optional `endpointUrl` selects an S3-compatible service.
 
@@ -132,7 +138,8 @@ A failed S3 export can leave partial objects under its new prefix.
 The helper retains them because another writer could own later object versions.
 Choose a new prefix for a retry.
 Inspect and remove partial objects through a separate storage operation.
-The required permissions are object listing, object creation, and object reads.
+Named snapshots also require bucket access checks, metadata reads, and deletion of owned compatibility probes.
+The required snapshot permissions are object listing, object creation, and object reads.
 This module does not list saved snapshots or delete cloud backups.
 
 ## Git API

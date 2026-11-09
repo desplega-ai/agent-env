@@ -79,6 +79,7 @@ export async function loadSpec(options = {}, command = []) {
   }
   const environmentName = config.environments?.[environment]?.name;
   config = resolveEnvironment(config, environment);
+  delete config.storage;
   if (config.e2b && Object.hasOwn(config.e2b, 'credentials')) throw new Error('Do not put E2B credentials in agent-env.json. Use E2B_API_KEY in the shell, an env file, or the private store.');
   const base = basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, environment === 'default' ? 30 : 24);
   const suffix = environment === 'default' ? '' : `-${hash(environment)}`;

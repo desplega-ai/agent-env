@@ -2,6 +2,8 @@
 
 This report records the earlier `dev-now` prototype before the `agent-env` rename and the conversion to CLI E2E tests.
 The unit-test totals below describe historical runs. They do not describe the current test suite.
+Those unit tests were removed. Their historical results do not establish current regression coverage.
+The [coverage audit](docs/testing-coverage.md) distinguishes current automated checks, manual evidence, and gaps at release 0.5.0.
 See [Agent Swarm evidence](examples/agent-swarm/VERIFICATION.md) for the first complete application check.
 See [release and CI instructions](docs/releases.md) for the current test commands.
 
