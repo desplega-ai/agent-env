@@ -11,6 +11,29 @@ const methods = ['server', 'primary-ip', 'ssh-key'];
 const fields = { server: 'serverId', 'primary-ip': 'primaryIpId', 'ssh-key': 'keyId' };
 const safeName = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/.test(value);
 const sshQuote = value => `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+const providerErrors = {
+  unauthorized: 'The token is invalid. Configure an authenticated hcloud context.',
+  forbidden: 'The credential lacks permission. Check the selected project and token permissions.',
+  resource_unavailable: 'The selected resource is unavailable. Check live availability before retrying.',
+  resource_limit_exceeded: 'The project resource limit was exceeded. Check limits in Hetzner Console.',
+  invalid_input: 'Hetzner rejected an input. Check the selected type, location, image, and resource options.',
+  not_found: 'Hetzner could not find the resource. Check the selected project and resource IDs.',
+  uniqueness_error: 'A resource already uses a unique value. Check existing resources before retrying.',
+  rate_limit_exceeded: 'Hetzner limited requests. Wait before retrying.',
+  locked: 'Another action holds the resource lock. Wait for that action before retrying.',
+  protected: 'Resource protection prevents this action. Check protection in Hetzner Console.',
+  maintenance: 'Hetzner maintenance prevents this action. Retry after maintenance.',
+  conflict: 'The resource changed during the request. Check its current state before retrying.',
+  unsupported_error: 'The resource does not support this action. Check the selected resource options.',
+  deprecated_api_endpoint: 'Hetzner removed this API endpoint. Update hcloud before retrying.',
+  json_error: 'Hetzner rejected the request format. Update hcloud before retrying.',
+  method_not_allowed: 'Hetzner rejected the request method. Update hcloud before retrying.',
+  service_error: 'A Hetzner service failed. Check provider status before retrying.',
+  server_error: 'The Hetzner API failed. Check provider status before retrying.',
+  bad_gateway: 'The Hetzner API gateway failed. Check provider status before retrying.',
+  unavailable: 'The Hetzner service is unavailable. Check provider status before retrying.',
+  timeout: 'The Hetzner request timed out. Check resource state before retrying.',
+};
 
 export function cloudOptions(value) {
   const options = typeof value === 'string' ? { provider: value } : value;
@@ -92,8 +115,27 @@ export function createCloudManager({
   }
 
   async function command(binary, args, env) {
-    try { return await run(binary, args, { timeout: 120000, killSignal: 'SIGKILL', ...(env ? { env } : {}) }); }
-    catch { throw new Error(`${binary} ${binary === 'hcloud' ? args.slice(0, 2).join(' ') : 'command'} failed. Check authentication, connectivity, and resource availability.`); }
+    try { return await run(binary, args, { timeout: 120000, killSignal: 'SIGKILL', errorStdout: false, ...(env ? { env } : {}) }); }
+    catch (error) {
+      if (binary === 'hcloud') {
+        if (error.code === 'ENOENT') throw new Error('hcloud is missing. Install the Hetzner Cloud CLI before retrying.');
+        // Never forward raw output. It can contain credentials, arguments, or private file contents.
+        // Config output can contain secrets. Classify only remote API and CLI failures.
+        if (args[0] !== 'config') {
+          const code = error.message?.match(/\(([a-z_]+)(?:,|\))/)?.[1];
+          if (Object.hasOwn(providerErrors, code)) {
+            const failure = new Error(`hcloud ${args.slice(0, 2).join(' ')} failed (${code}). ${providerErrors[code]}`);
+            failure.providerCode = code;
+            throw failure;
+          }
+          if (/unknown command|unknown flag/.test(error.message ?? '')) throw new Error('hcloud lacks a required command or flag. Update the Hetzner Cloud CLI before retrying.');
+          if (/no token|no active context|no context|token is required/i.test(error.message ?? '')) throw new Error('Configure an authenticated hcloud context before using cloud instances.');
+          if (/timeout|timed out|deadline exceeded|no such host|connection refused|network is unreachable|TLS handshake/i.test(error.message ?? '')) throw new Error('hcloud connection failed. Check connectivity and the configured API endpoint before retrying.');
+        }
+        throw new Error('hcloud failed. Check the authenticated context, connectivity, and resource availability.');
+      }
+      throw new Error(`${binary} command failed. Check authentication, connectivity, and resource availability.`);
+    }
   }
   async function authentication(record) {
     if (record && !record.authentication?.fingerprint) throw new Error('This older cloud record has no credential binding. Preserve its local keys and recover its resources in Hetzner.');
@@ -113,6 +155,59 @@ export function createCloudManager({
     const output = await command('hcloud', [kind, action, ...args, ...(json ? ['--output', 'json'] : [])], env);
     if (!json) return output;
     try { return JSON.parse(output); } catch { throw new Error(`hcloud ${kind} ${action} returned invalid JSON.`); }
+  }
+  async function preflight(options, env, rejectedAllocation = false) {
+    const readJson = async args => {
+      const output = await command('hcloud', args, env);
+      try { return JSON.parse(output); } catch { throw new Error('hcloud preflight returned invalid JSON. Update hcloud before retrying.'); }
+    };
+    const locations = await readJson(['location', 'list', '--output', 'json']);
+    const types = await readJson(['server-type', 'list', '--output', 'json']);
+    if (!Array.isArray(locations) || !Array.isArray(types)) throw new Error('hcloud preflight returned invalid resources. Update hcloud before retrying.');
+    const matches = (resource, value) => resource.name === value || String(resource.id) === value;
+    const location = locations.find(item => matches(item, options.location));
+    const type = types.find(item => matches(item, options.type));
+    const selection = `Selected Hetzner type ${options.type}, location ${options.location}.`;
+    if (!location) {
+      const names = locations.filter(item => safeName(item.name)).slice(0, 10).map(item => item.name).join(', ');
+      throw new Error(`${selection} Unknown location. Select --location NAME or ID from hcloud location list. Known locations: ${names || 'none'}.`);
+    }
+    const availability = type?.locations?.find(item => item.id === location.id || item.name === location.name);
+    if (availability?.available === true && !rejectedAllocation) return;
+    let reason;
+    if (rejectedAllocation) reason = 'Hetzner rejected allocation (resource_unavailable).';
+    else if (!type) reason = 'Unknown server type.';
+    else if (!Array.isArray(type.locations)) reason = 'Availability data is missing. Update hcloud before retrying.';
+    else if (!availability) reason = 'This server type does not support this location.';
+    else if (availability.available === false) reason = 'This server type is unavailable for new allocation at this location.';
+    else reason = 'Availability is unknown at this location.';
+    const candidates = types.filter(item => (!rejectedAllocation || item.id !== type?.id) && safeName(item.name) && ['x86', 'arm'].includes(item.architecture)
+      && item.locations?.some(entry => (entry.id === location.id || entry.name === location.name) && entry.available === true));
+    const architectureOrder = (a, b) => Number(b.architecture === type?.architecture) - Number(a.architecture === type?.architecture);
+    let alternatives;
+    try {
+      const { pricing } = await readJson(['api', '/pricing']);
+      if (!/^[A-Z]{3}$/.test(pricing?.currency) || !/^\d+(?:\.\d+)?$/.test(pricing?.vat_rate)
+        || !Array.isArray(pricing.server_types) || !Array.isArray(pricing.primary_ips)) throw new Error('Live pricing metadata is incomplete.');
+      const priceAt = resource => resource?.prices?.find(item => item.location === location.name);
+      const amount = value => typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+      const priceText = price => Number.isFinite(amount(price?.price_hourly?.net)) && Number.isFinite(amount(price?.price_monthly?.net))
+        ? `${amount(price.price_hourly.net)}/hour, ${amount(price.price_monthly.net)}/month` : 'price unavailable';
+      const rows = candidates.map(item => ({ ...item, price: priceAt(pricing.server_types.find(entry => entry.id === item.id)) }))
+        .sort((a, b) => {
+          const costA = amount(a.price?.price_monthly?.net), costB = amount(b.price?.price_monthly?.net);
+          return architectureOrder(a, b) || (Number.isFinite(costA) ? costA : Infinity) - (Number.isFinite(costB) ? costB : Infinity) || a.name.localeCompare(b.name);
+        })
+        .slice(0, 5).map(item => `${item.name} (${item.architecture}): ${priceText(item.price)}`);
+      alternatives = `Live alternatives at ${location.name} (up to 5): ${rows.join('. ') || 'none'}. `
+        + `Prices use ${pricing.currency}, net (exclude VAT). Project VAT rate: ${Number(pricing.vat_rate)}%. `
+        + `Server prices exclude IPv4. IPv4 separately: ${priceText(priceAt(pricing.primary_ips.find(item => item.type === 'ipv4')))}.`;
+    } catch {
+      alternatives = `Live alternatives at ${location.name} (up to 5): ${candidates.sort(architectureOrder).slice(0, 5).map(item => `${item.name} (${item.architecture})`).join(', ') || 'none'}. `
+        + 'Live prices are unavailable. Check hcloud api /pricing for currency, VAT, server prices, and separate IPv4 prices.';
+    }
+    throw new Error(`${selection} ${reason} ${alternatives} Select --cloud-type TYPE and --location LOCATION explicitly. `
+      + 'Availability is an indicator, not a guarantee. No alternative was selected.');
   }
   function verify(record, kind, resource) {
     if (!Number.isSafeInteger(resource.id) || resource.id <= 0 || resource.name !== `${record.resourceName}-${kind}` ||
@@ -208,7 +303,16 @@ export function createCloudManager({
         const options = cloudOptions({ ...record?.options, ...(typeof spec.cloud === 'string' ? { provider: spec.cloud } : explicit) });
         if (record && ['type', 'image', 'location'].some(key => options[key] !== record.options[key])) throw new Error('Cloud machine options differ from the ownership record. Purge before replacement.');
         if (options.expiresAt && Date.parse(options.expiresAt) <= now()) throw new Error('Cloud expiry has elapsed. Destroy or extend this instance before start.');
-        const { binding } = await authentication(record);
+        const { binding, env } = await authentication(record);
+        if (record?.destroying) throw new Error(`Cloud cleanup is incomplete. Run agent-env rm ${spec.name} --purge before starting it.`);
+        // Existing servers can resume even when Hetzner stops offering their type.
+        if (!record || !await reconcile(record, 'server')) {
+          try { await preflight(options, env); }
+          catch (error) {
+            if (record) error.message += ` To change machine options, first run agent-env rm ${spec.name} --purge. This removes retained cloud resources.`;
+            throw error;
+          }
+        }
         if (!record) {
           const recordId = randomUUID().replaceAll('-', '');
           record = { version: 1, owner: spec.owner, name: spec.name, recordId, resourceName: `dn-${recordId}`, createdAt: new Date(now()).toISOString(), options, authentication: binding, attempted: {}, committed: false };
@@ -216,7 +320,6 @@ export function createCloudManager({
           await chmod(directory(record), 0o700);
           await save(record);
         }
-        if (record.destroying) throw new Error('Cloud cleanup is incomplete. Retry destroyCloud before start.');
         record.options = options;
         await save(record);
         const dir = directory(record);
@@ -226,8 +329,16 @@ export function createCloudManager({
         const key = await createResource(record, 'ssh-key', ['--public-key-from-file', join(dir, 'identity.pub')]);
         if (key.public_key?.trim() !== identity.publicKey.trim()) throw new Error('Cloud SSH key does not match the dedicated local key.');
         const ip = await createResource(record, 'primary-ip', ['--type', 'ipv4', '--location', options.location, '--auto-delete=false']);
-        let server = await createResource(record, 'server', ['--type', options.type, '--location', options.location, '--image', options.image,
-          '--ssh-key', String(key.id), '--primary-ipv4', String(ip.id), '--without-ipv6', '--user-data-from-file', join(dir, 'cloud-init.yaml')]);
+        let server;
+        try {
+          server = await createResource(record, 'server', ['--type', options.type, '--location', options.location, '--image', options.image,
+            '--ssh-key', String(key.id), '--primary-ipv4', String(ip.id), '--without-ipv6', '--user-data-from-file', join(dir, 'cloud-init.yaml')]);
+        } catch (error) {
+          if (error.providerCode === 'resource_unavailable') {
+            try { await preflight(options, env, true); } catch (diagnostic) { error.message += ` ${diagnostic.message}`; }
+          }
+          throw error;
+        }
         if (server.public_net?.ipv4?.id !== ip.id) throw new Error('Cloud server IP does not match the ownership record.');
         for (let attempt = 0; server?.status === 'off' && attempt < 3; attempt++) {
           try { await hcloud(record, 'server', 'poweron', [String(server.id)]); }

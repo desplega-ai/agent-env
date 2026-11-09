@@ -53,11 +53,15 @@ Use this workflow only when the user requests paid infrastructure.
 Check the authenticated `hcloud` context before provisioning.
 
 ```sh
-agent-env up --name cloud --cloud hetzner --location hel1
+agent-env up --name cloud --cloud hetzner --cloud-type cpx22 --location hel1
 agent-env down cloud
 agent-env up cloud
 ```
 
+New allocations check live availability before creating keys or IPs.
+If the selection fails, read the available types, architectures, and prices in the error.
+Obtain the user's choice before changing the selected type or location.
+The CLI never chooses an alternative automatically. Capacity can change after the check.
 `down` powers off the owned machine when no other running instance needs it.
 Powered-off machines still incur charges.
 `agent-env rm cloud --purge` deletes the last instance's owned machine, IP, key, and data.

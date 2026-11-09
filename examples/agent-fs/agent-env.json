@@ -1,0 +1,16 @@
+{
+  "provider": "compose",
+  "startupTimeoutSeconds": 900,
+  "compose": {
+    "files": ["compose.agent-env.yaml"],
+    "routes": {
+      "api": { "service": "agent-fs", "target": 7433, "port": 7433, "protocol": "http" }
+    }
+  },
+  "commands": {
+    "test": {
+      "service": "api",
+      "command": ["bun", "--no-env-file", "packages/core/agent-env-checks.mjs"]
+    }
+  }
+}

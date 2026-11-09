@@ -10,6 +10,7 @@ const cwd = join(directory, 'checkout'), home = join(directory, 'state');
 const { cli, invoke } = createCli(cwd, home);
 const state = async () => JSON.parse(await readFile(join(home, 'state.json'), 'utf8'));
 const port = await freePort();
+const quiet = { ...process.env, HCLOUD_DEBUG: 'false', HCLOUD_DEBUG_FILE: '' };
 let cloud, worktree;
 async function until(check, milliseconds = 120000) {
   const deadline = Date.now() + milliseconds;
@@ -17,10 +18,11 @@ async function until(check, milliseconds = 120000) {
   throw new Error('The cloud test condition did not complete before its deadline.');
 }
 async function absentResources() {
-  if (!cloud) return;
+  const owner = (await state()).owner;
   for (const kind of ['server', 'primary-ip', 'ssh-key']) {
-    const resources = JSON.parse(await run('hcloud', [kind, 'list', '--output', 'json']));
-    assert.ok(resources.every(resource => resource.labels?.['agent-env.record'] !== cloud.recordId), `${kind} still exists`);
+    const resources = JSON.parse(await run('hcloud', [kind, 'list', '--output', 'json'], { env: quiet }));
+    assert.ok(resources.every(resource => resource.labels?.['agent-env.owner'] !== owner
+      && (!cloud || resource.labels?.['agent-env.record'] !== cloud.recordId)), `${kind} still exists`);
   }
 }
 try {
@@ -32,9 +34,17 @@ try {
     command: 'httpd -f -p 3000 -h /workspace', volumes: { data: '/data' } } } }));
   await run('git', ['-C', cwd, 'add', '.']);
   await run('git', ['-C', cwd, '-c', 'user.name=agent-env E2E', '-c', 'user.email=test@localhost', 'commit', '-qm', 'Cloud fixture']);
-  const cloudArgs = ['--cloud', 'hetzner', '--location', process.env.AGENT_ENV_TEST_CLOUD_LOCATION ?? 'hel1', '--idle-minutes', '0'];
-  await cli(['up', '--name', 'alpha', ...cloudArgs]);
+  const type = process.env.AGENT_ENV_TEST_CLOUD_TYPE ?? 'cpx22';
+  const location = process.env.AGENT_ENV_TEST_CLOUD_LOCATION ?? 'hel1';
+  // Bound idle cost while keeping TTL selection explicit for each startup.
+  const cloudArgs = ['--cloud', 'hetzner', '--cloud-type', type, '--location', location, '--idle-minutes', '5'];
+  console.log(`Cloud E2E explicitly selects type ${type}, location ${location}. No fallback is permitted.`);
+  await cli(['up', '--name', 'alpha', ...cloudArgs, '--ttl-hours', '0.5']);
   cloud = (await state()).instances.alpha.spec.cloud;
+  assert.equal(cloud.type, type);
+  assert.equal(cloud.location, location);
+  assert.ok(Date.parse(cloud.expiresAt) > Date.now());
+  assert.equal(cloud.idleTimeoutMs, 5 * 60000);
   console.log('Cloud provisioned. Checking credential binding, synchronization, and forks.');
   assert.equal(await (await fetch(`http://127.0.0.1:${port}/src/build/source.txt`)).text(), 'nested source');
   await writeFile(join(cwd, 'src/build/source.txt'), 'synchronized nested source');
@@ -44,7 +54,7 @@ try {
     const rejected = await invoke(['rm', 'alpha', '--purge'], false, { env: { HCLOUD_TOKEN: 'agent-env-intentionally-invalid-test-token' } });
     assert.notEqual(rejected.code, 0);
     assert.match(rejected.stderr, /differs from this cloud record/);
-    const servers = JSON.parse(await run('hcloud', ['server', 'list', '--output', 'json']));
+    const servers = JSON.parse(await run('hcloud', ['server', 'list', '--output', 'json'], { env: quiet }));
     assert.ok(servers.some(server => server.labels?.['agent-env.record'] === cloud.recordId));
   } finally {
     await cli(['daemon', 'stop']);
