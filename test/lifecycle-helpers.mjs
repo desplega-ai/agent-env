@@ -14,14 +14,17 @@ export const docker = args => run('docker', args);
 // Only this read-only request bypasses the CLI. It identifies the socket owner.
 function ping(socketPath) {
   return new Promise((resolveResult, reject) => {
-    const request = http.request({ socketPath, method: 'POST', path: '/' }, async response => {
+    const request = http.request({ socketPath, method: 'POST', path: '/', agent: false }, async response => {
       try {
         let body = '';
         for await (const chunk of response) body += chunk;
         assert.equal(response.statusCode, 200);
+        // Close this client socket before checking the daemon's socket ownership.
+        await socketClosed;
         resolveResult(JSON.parse(body).pid);
       } catch (error) { reject(error); }
     });
+    const socketClosed = new Promise(resolveClosed => request.once('socket', socket => socket.once('close', resolveClosed)));
     request.setTimeout(2000, () => request.destroy(new Error('The socket ping timed out.')));
     request.on('error', reject);
     request.end(JSON.stringify({ type: 'ping' }));
@@ -48,8 +51,13 @@ export async function fixture(suite) {
   async function daemonPid() {
     const pid = await ping(socketPath);
     assert.ok(Number.isInteger(pid) && pid > 1 && pid !== process.pid);
-    const owners = await run('lsof', ['-nP', '-a', '-U', '-Fp', '--', socketPath]);
-    assert.deepEqual([...new Set(owners.split('\n').filter(line => /^p\d+$/.test(line)).map(line => Number(line.slice(1))))], [pid], 'Exactly one daemon must own the private socket.');
+    const owners = await run('lsof', ['-nP', '-a', '-U', '-FpcfintT', '-Ts', '--', socketPath]);
+    const pids = [...new Set(owners.split('\n').filter(line => /^p\d+$/.test(line)).map(line => Number(line.slice(1))))];
+    let diagnostics = '';
+    if (pids.length !== 1 || pids[0] !== pid) {
+      diagnostics = (await subprocess('ps', ['-p', pids.join(','), '-o', 'pid=,ppid=,stat=,comm='])).stdout;
+    }
+    assert.deepEqual(pids, [pid], `Exactly one daemon must own the private socket. Test PID: ${process.pid}.\n${owners}\n${diagnostics}`);
     assert.ok((await run('ps', ['-p', String(pid), '-o', 'command='])).includes(daemonPath), 'The socket owner must run the installed daemon.');
     return pid;
   }
