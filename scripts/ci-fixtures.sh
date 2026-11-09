@@ -70,6 +70,8 @@ EOF
   sudo /usr/sbin/sshd -D -e -f "$fixture_root/ssh/sshd_config" > "$fixture_root/ssh/sshd.log" 2>&1 &
   export AGENT_ENV_TEST_SSH=agent-env-ci
   export AGENT_ENV_TEST_SSH_CONFIG="$fixture_root/ssh/config"
+  export AGENT_ENV_TEST_RECOVERY_SSH="$AGENT_ENV_TEST_SSH"
+  export AGENT_ENV_TEST_RECOVERY_SSH_CONFIG="$AGENT_ENV_TEST_SSH_CONFIG"
   fixture_ready=false
   for ((fixture_attempt=0; fixture_attempt<30; fixture_attempt++)); do
     if ssh -F "$AGENT_ENV_TEST_SSH_CONFIG" "$AGENT_ENV_TEST_SSH" 'docker info >/dev/null && command -v rsync >/dev/null'; then fixture_ready=true; break; fi
@@ -87,11 +89,12 @@ if [[ "$fixture_group" == s3 ]]; then
   export AWS_CONFIG_FILE="$fixture_root/aws-config" AWS_SHARED_CREDENTIALS_FILE="$fixture_root/aws-credentials"
   printf '{"identities":[{"name":"ci","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" > "$fixture_root/s3.json"
   fixture_container="agent-env-ci-s3-$(node -e 'console.log(require("node:crypto").randomBytes(8).toString("hex"))')"
+  export AGENT_ENV_TEST_S3_CONTAINER="$fixture_container"
   echo "$fixture_container" > "$fixture_root/s3-container"
   docker run -d --name "$fixture_container" --label "agent-env.ci.fixture=$fixture_root" --publish 127.0.0.1::8333 \
     --mount "type=bind,src=$fixture_root/s3.json,dst=/etc/seaweedfs/s3.json,readonly" \
     chrislusf/seaweedfs:4.52@sha256:57877e32bb90073b37dc109b438ba66e84fd5ed9ced5f5c04f56444ef243ce59 \
-    server -ip=127.0.0.1 -ip.bind=0.0.0.0 -s3 -s3.config=/etc/seaweedfs/s3.json -volume.max=1 -master.volumeSizeLimitMB=64 >/dev/null
+    server -ip=127.0.0.1 -ip.bind=0.0.0.0 -s3 -s3.config=/etc/seaweedfs/s3.json -volume.max=1 -master.volumeSizeLimitMB=1024 >/dev/null
   fixture_port=$(docker port "$fixture_container" 8333/tcp)
   export AGENT_ENV_TEST_S3_ENDPOINT="http://$fixture_port"
   export AGENT_ENV_TEST_S3=s3://agent-env-ci/snapshots

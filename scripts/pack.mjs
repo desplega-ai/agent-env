@@ -17,13 +17,14 @@ for (const file of files) {
   assert.ok(!file.split('/').some(part => /^(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.envrc|\.npmrc|credentials)$/.test(part)), `Credential file: ${file}`);
   assert.ok(!file.endsWith('/VERIFICATION.md') && !file.startsWith('package/assets/concepts/'), `Unpublished development file: ${file}`);
 }
-for (const file of ['package/package.json', 'package/bin/agent-env.mjs', 'package/src/daemon.mjs', 'package/README.md', 'package/LICENSE', 'package/skills/agent-env/SKILL.md', 'package/skills/agent-env/references/remote-and-data.md']) {
+for (const file of ['package/package.json', 'package/bin/agent-env.mjs', 'package/src/daemon.mjs', 'package/src/sdk.mjs', 'package/src/sdk.d.ts', 'package/README.md', 'package/LICENSE', 'package/skills/agent-env/SKILL.md', 'package/skills/agent-env/references/remote-and-data.md']) {
   assert.ok(files.includes(file), `The package lacks ${file}.`);
 }
 const metadata = JSON.parse(execFileSync('tar', ['-xOf', tarball, 'package/package.json'], { encoding: 'utf8' }));
 assert.equal(metadata.version, JSON.parse(readFileSync('package.json')).version);
 assert.equal(packed.version, metadata.version, 'npm must preserve the exact package version.');
 assert.deepEqual(metadata.bin, { 'agent-env': './bin/agent-env.mjs' });
+assert.deepEqual(metadata.exports, { '.': { types: './src/sdk.d.ts', import: './src/sdk.mjs', default: './src/sdk.mjs' } });
 console.log(files.join('\n'));
 console.log(`Audited ${files.length} files: ${packed.filename} (${packed.integrity})`);
 if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `tarball=${packed.filename}\nversion=${packed.version}\n`);

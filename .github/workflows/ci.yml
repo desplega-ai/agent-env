@@ -120,6 +120,9 @@ jobs:
         run: |
           docker info
           docker compose version
+      - name: Install the pinned TypeScript compiler for SDK consumer tests
+        if: matrix.group == 'docker'
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Install the real SSH fixture dependencies
         if: matrix.group == 'ssh'
         run: |

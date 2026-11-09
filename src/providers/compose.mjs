@@ -1,6 +1,8 @@
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DockerProvider } from './docker.mjs';
+import { randomUUID } from 'node:crypto';
+import { ownership, planAllocation, removeAllocation, verifyAllocation } from './recovery.mjs';
 import { hash, validate } from '../config.mjs';
 import { credentialValues, redactEnvironment, sensitiveValuesForSpec } from '../environments.mjs';
 import { home } from '../paths.mjs';
@@ -230,14 +232,17 @@ export class ComposeProvider extends DockerProvider {
   }
   async compose(handle, args) {
     try {
-      return await this.docker(handle.spec, ['compose', '--project-name', handle.project, '--project-directory', handle.workspace,
+      const execute = ['create', 'up', 'build', 'run', 'pull'].includes(args[0]) && handle.allocation
+        ? this.allocate.bind(this, handle) : this.docker.bind(this, handle.spec);
+      return await execute(['compose', '--project-name', handle.project, '--project-directory', handle.workspace,
         '--env-file', '/dev/null', '-f', handle.runtimeFile,
         ...(handle.spec.compose.profiles ?? []).flatMap(profile => ['--profile', profile]), ...args], { env: { ...composeEnvironment({}), COMPOSE_DISABLE_ENV_FILE: '1' } });
     } catch (error) {
+      if (['ALLOCATION_RUNNING', 'ALLOCATION_UNCERTAIN'].includes(error.code)) throw error;
       throw Object.assign(new Error(`Compose ${args[0]} failed. Check service status and redacted logs.`), { exitCode: error.exitCode ?? 1 });
     }
   }
-  async prepare(spec, workspace, directory) {
+  async prepare(spec, workspace, directory, labels = { 'agent-env.owner': spec.owner, 'agent-env.instance': spec.name }) {
     const model = structuredClone(spec.compose.model ?? await parseCompose(spec));
     const environment = spec.compose.environment ?? await interpolationEnvironment(spec);
     const redactions = sensitiveValuesForSpec(spec);
@@ -266,7 +271,8 @@ export class ComposeProvider extends DockerProvider {
         if (!originalName || model.networks?.[network]?.external) continue;
         service.networks[network] = { ...settings, aliases: [...new Set([...(settings?.aliases ?? []), originalName])] };
       }
-      delete service.container_name;
+      service.container_name = `${project}-${name}-1`;
+      service.labels = { ...service.labels, ...labels };
       if (builtImages.has(service.image)) {
         service.image = builtImages.get(service.image);
         service.pull_policy = service.build ? 'build' : 'never';
@@ -274,7 +280,7 @@ export class ComposeProvider extends DockerProvider {
         service.image = `${project}-${name}:agent-env`;
         service.pull_policy = 'build';
       }
-      if (service.build) service.build.labels = { ...service.build.labels, 'agent-env.owner': spec.owner, 'agent-env.instance': spec.name };
+      if (service.build) service.build.labels = { ...service.build.labels, ...labels };
       service.ports = (service.ports ?? []).map(port => ({ target: port.target, protocol: 'tcp', host_ip: '127.0.0.1', published: '0' }));
       if (spec.host) {
         for (const volume of service.volumes ?? []) {
@@ -302,7 +308,8 @@ export class ComposeProvider extends DockerProvider {
       for (const [name, resource] of Object.entries(model[kind] ?? {})) {
         if (!resource.external) {
           resource.name = `${project}-${name}`;
-          resource.labels = { ...resource.labels, 'agent-env.owner': spec.owner };
+          resource.labels = { ...resource.labels, ...labels };
+          if (kind === 'volumes') delete resource.labels['agent-env.record'];
         }
       }
     }
@@ -330,17 +337,17 @@ export class ComposeProvider extends DockerProvider {
     // Compose config already escapes interpolation for another Compose invocation.
     await writeFile(localFile, `${JSON.stringify(model, null, 2)}\n`, { mode: 0o600 });
     return { project, services, localFile, assets,
+      containers: Object.values(model.services).map(service => service.container_name),
+      ownedNetworks: Object.values(model.networks ?? {}).filter(network => !network.external).map(network => network.name),
       ownedImages: [...new Set(Object.values(model.services).filter(service => service.build).map(service => service.image))],
       ownedVolumes: Object.values(model.volumes ?? {}).filter(volume => !volume.external).map(volume => volume.name) };
   }
-  async create(spec) {
+  async create(spec, checkpoint = async () => {}) {
     validate(spec);
     if (!/^[a-z0-9-]+$/.test(spec.owner ?? '')) throw new Error('Compose instances require a valid owner identifier.');
     await this.docker(spec, ['info', '--format', '{{.ServerVersion}}']);
     const existing = await this.docker(spec, ['ps', '-aq', '--filter', `label=com.docker.compose.project=${this.prefix(spec)}`]);
     if (existing) throw new Error('This Compose project already has containers. Reconnect its existing handle or choose another instance name.');
-    const previousVolumes = new Set((await this.docker(spec, ['volume', 'ls', '-q'])).split(/\s+/));
-    const previousImages = new Set((await this.docker(spec, ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'])).split(/\s+/));
     await mkdir(home, { recursive: true, mode: 0o700 });
     const directory = await mkdtemp(join(home, 'compose-'));
     await chmod(directory, 0o700);
@@ -348,9 +355,18 @@ export class ComposeProvider extends DockerProvider {
     let attempted = false;
     try {
       const workspace = spec.host ? `${await this.command(spec, ['pwd'])}/.local/share/agent-env/${spec.owner}/${spec.name}` : spec.cwd;
-      const prepared = await this.prepare(spec, workspace, directory);
-      handle = { spec, workspace, project: prepared.project, services: prepared.services, ownedVolumes: prepared.ownedVolumes, ownedImages: prepared.ownedImages, runtimeDirectory: directory,
+      const allocation = { record: randomUUID() };
+      const prepared = await this.prepare(spec, workspace, directory, ownership({ spec, allocation }));
+      handle = { spec, workspace, allocation, project: prepared.project, services: prepared.services, ownedVolumes: prepared.ownedVolumes, ownedImages: prepared.ownedImages, runtimeDirectory: directory,
         runtimeFile: spec.host ? join(workspace, '.agent-env', 'compose.json') : prepared.localFile };
+      await planAllocation(this, handle, [
+        ...prepared.containers.map(name => ({ kind: 'container', name })),
+        ...prepared.ownedNetworks.map(name => ({ kind: 'network', name })),
+        ...prepared.ownedVolumes.map(name => ({ kind: 'volume', name })),
+        ...prepared.ownedImages.map(name => ({ kind: 'image', name })),
+      ]);
+      await checkpoint(handle);
+      attempted = true;
       if (spec.host) {
         await this.command(spec, ['mkdir', '-p', workspace]);
         await this.command(spec, ['chmod', '700', workspace]);
@@ -365,21 +381,24 @@ export class ComposeProvider extends DockerProvider {
           await this.command(spec, ['chmod', '600', asset.remote]);
         }
       }
-      attempted = true;
       await this.launch(handle);
       return handle;
     } catch (error) {
-      if (attempted) await this.compose(handle, ['down', '--remove-orphans']).catch(() => {});
       if (attempted) {
-        for (const volume of handle.ownedVolumes.filter(volume => !previousVolumes.has(volume))) await this.docker(spec, ['volume', 'rm', volume]).catch(() => {});
-        await this.removeImages(handle, handle.ownedImages.filter(image => !previousImages.has(image))).catch(cleanup => { error.message += ` Image cleanup failed: ${cleanup.message}`; });
+        try {
+          await removeAllocation(this, handle, { purge: true, failed: true });
+          if (spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${spec.owner}/${spec.name}`)) await this.command(spec, ['rm', '-rf', '--', handle.workspace]);
+          await rm(directory, { recursive: true, force: true });
+          error.cleanupComplete = true;
+        }
+        catch (cleanup) { error.message += ` Cleanup failed: ${cleanup.message}`; }
       }
-      if (handle?.spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${spec.owner}/${spec.name}`)) await this.command(spec, ['rm', '-rf', '--', handle.workspace]).catch(() => {});
-      await rm(directory, { recursive: true, force: true });
+      if (!attempted) await rm(directory, { recursive: true, force: true });
       throw error;
     }
   }
   async wait(handle, deadline) {
+    if (handle.allocation) await verifyAllocation(this, handle);
     const containers = new Map();
     for (const service of Object.values(handle.services)) {
       if (!containers.has(service.composeService)) {
@@ -404,11 +423,18 @@ export class ComposeProvider extends DockerProvider {
   connect(handle) {
     return super.connect({ ...handle, services: Object.fromEntries(Object.entries(handle.services).filter(([, service]) => !service.internal)) });
   }
+  async recover(handle) {
+    await removeAllocation(this, handle, { computeOnly: true });
+    await this.start(handle);
+    return handle;
+  }
   async start(handle) {
+    if (handle.allocation) await verifyAllocation(this, handle);
     await this.sync(handle);
     await this.launch(handle);
   }
   async launch(handle) {
+    if (handle.allocation) await verifyAllocation(this, handle);
     await this.compose(handle, ['create', '--build']);
     const deadline = Date.now() + (handle.spec.startupTimeoutSeconds ?? 60) * 1000;
     await this.compose(handle, ['up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', String(handle.spec.startupTimeoutSeconds ?? 60)]);
@@ -424,8 +450,17 @@ export class ComposeProvider extends DockerProvider {
       await this.docker(handle.spec, ['image', 'rm', name]);
     }
   }
-  stop(handle) { return this.compose(handle, ['stop', '-t', '5']); }
+  async stop(handle) {
+    if (handle.allocation) await verifyAllocation(this, handle);
+    return this.compose(handle, ['stop', '-t', '5']);
+  }
   async remove(handle, purge = false) {
+    if (handle.allocation) {
+      await removeAllocation(this, handle, { purge });
+      await rm(handle.runtimeDirectory, { recursive: true, force: true });
+      if (handle.spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${handle.spec.owner}/${handle.spec.name}`)) await this.command(handle.spec, ['rm', '-rf', '--', handle.workspace]);
+      return;
+    }
     if (handle.removed) {
       if (!purge) return;
       const volumes = [];

@@ -7,8 +7,7 @@ license: MIT
 # agent-env
 
 Use the `agent-env` CLI to run development services behind stable localhost addresses.
-These instructions describe CLI version 0.4.1.
-Check `agent-env --help` when the installed version differs from these instructions.
+Check `agent-env --help` for the installed version's commands and options.
 Run `agent-env skill` to read this guide and its reference offline.
 Run `agent-env skill install` to install the bundled skill for your coding agent.
 
@@ -19,7 +18,7 @@ Run `agent-env skill install` to install the bundled skill for your coding agent
 3. Check the provider prerequisites. Docker and Dev Containers require `docker info`. Compose also requires `docker compose version`.
 4. Inspect `agent-env --json list` before choosing an instance name or reusing ports.
 
-The CLI requires macOS or Linux and Node.js 22 or later.
+The CLI requires macOS or Linux and Node.js 22.19 or later.
 Installing this skill does not install the CLI or Docker.
 Preserve existing project configuration and the user's selected compute target.
 Use local Docker when no remote target is requested.
@@ -172,6 +171,8 @@ Do not use `rm --purge` to resolve a configuration mismatch. It deletes managed 
 
 Use `agent-env down app` to stop services and retain data.
 `agent-env rm app` removes containers but retains volumes and built images.
+New instances do not attach retained anonymous volumes automatically. Use named volumes for persistent data.
+Purge, failed-start cleanup, and interrupted-start recovery remove anonymous volumes with their containers.
 `agent-env rm app --purge` also removes managed data and owned Compose image tags.
 Delete data only when that deletion is part of the user's request.
 `agent-env daemon stop` stops routing and synchronization, but leaves containers running.
@@ -186,6 +187,18 @@ Avoid `--all` when working on one project.
 | Port conflict | Inspect `list` and the port owner. Change configuration instead of terminating unrelated processes. |
 | Stale remote files | Run `sync NAME`. Check exclusions before expecting credentials or generated directories to transfer. |
 | CLI request timed out | Check `list` and `logs` before retrying. The daemon may still be starting services. |
+| Recovery required | Use `up NAME` to recover interrupted Docker or Compose startup. Use `rm NAME --purge` only when deletion is intended. |
+
+Keep the private state directory until recovery or purge succeeds.
+Wait for an active allocation command before retrying recovery or purge.
+If completion is uncertain, preserve the record at the path in the error.
+Verify that all local and remote allocation commands have stopped.
+Then use `agent-env rm NAME --accept-uncertain` to remove compute and retain volumes.
+Add `--purge` only when deletion is intended.
+The acknowledgement still refuses active local process groups and foreign resources.
+It cannot check whether remote commands stopped. Do not delete recovery records manually.
+Do not snapshot or fork an instance that requires recovery.
+Do not remove resources that fail ownership verification.
 
 For a slow saved instance, use `agent-env up app --timeout 900`.
 Startup timeouts accept 1 to 3600 seconds. Compose image builds precede the readiness timeout.
@@ -193,5 +206,6 @@ Startup timeouts accept 1 to 3600 seconds. Compose image builds precede the read
 ## Additional workflows
 
 Read [remote services and data operations](references/remote-and-data.md) for SSH, Hetzner, HTTPS, snapshots, and worktree forks.
+That reference also covers named storage profiles, credential references, compatibility checks, and `storage://NAME/prefix` locations.
 For Agent Swarm itself, follow the [tested example](https://github.com/desplega-ai/agent-env/blob/master/docs/agent-swarm.md).
 That example uses an explicit private env file, isolated Linux dependencies, and a 900-second startup timeout.

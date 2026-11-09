@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, posix } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { run } from './system.mjs';
+import { awsStorage } from './storage.mjs';
 
 const FORMAT = 'agent-env-snapshot';
 const VERSION = 1;
@@ -19,12 +19,7 @@ function locationInfo(location) {
   return { bucket: match[1], prefix: `${match[2]}/` };
 }
 
-function aws(options, args) {
-  return run(options.awsCommand ?? 'aws', [
-    ...(options.endpointUrl ? ['--endpoint-url', options.endpointUrl] : []),
-    '--no-cli-pager', 's3api', ...args,
-  ], { env: { ...process.env, ...options.awsEnv, AWS_PAGER: '' } });
-}
+const aws = awsStorage;
 
 async function matchingContainers(provider, spec, filter) {
   const ids = (await provider.docker(spec, ['container', 'ls', '-aq', '--filter', filter])).split(/\s+/).filter(Boolean);

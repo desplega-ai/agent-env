@@ -32,12 +32,16 @@ export TMPDIR="$work/tmp" AGENT_ENV_HOME="$work/state"
 export XDG_CONFIG_HOME="$work/config" XDG_CACHE_HOME="$work/cache" npm_config_cache="$work/npm-cache"
 export npm_config_userconfig="$work/npmrc" npm_config_globalconfig="$work/npmrc-global"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
-unset AGENT_ENV_TEST_SSH AGENT_ENV_TEST_SSH_CONFIG AGENT_ENV_TEST_S3 AGENT_ENV_TEST_S3_ENDPOINT AGENT_ENV_TEST_SANDBOX
+unset AGENT_ENV_TEST_SSH AGENT_ENV_TEST_SSH_CONFIG AGENT_ENV_TEST_S3 AGENT_ENV_TEST_S3_ENDPOINT AGENT_ENV_TEST_S3_CONTAINER AGENT_ENV_TEST_SANDBOX
+unset AGENT_ENV_TEST_RECOVERY_SSH AGENT_ENV_TEST_RECOVERY_SSH_CONFIG
 mkdir -p "$TMPDIR" "$AGENT_ENV_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
 npm install --prefix "$work/prefix" --ignore-scripts --no-save --no-package-lock --no-audit --no-fund "$tarball"
 export AGENT_ENV_CLI="$work/prefix/node_modules/.bin/agent-env"
 "$AGENT_ENV_CLI" --help >/dev/null
 # shellcheck source=scripts/ci-fixtures.sh
 source "$scripts/ci-fixtures.sh" "$group" "$work"
-if [[ "$group" == docker ]]; then export AGENT_ENV_TEST_SANDBOX=1; fi
+if [[ "$group" == docker ]]; then
+  export AGENT_ENV_TEST_SANDBOX=1
+  export AGENT_ENV_SDK_TARBALL="$tarball"
+fi
 node test/run.mjs "$group"

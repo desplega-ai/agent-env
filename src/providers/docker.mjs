@@ -1,4 +1,6 @@
 import http from 'node:http';
+import { ownership, planAllocation, removeAllocation, verifyAllocation } from './recovery.mjs';
+import { allocationCommand } from '../allocation-command.mjs';
 import { spawn } from 'node:child_process';
 import { run, quote, freePort, reachable, delay } from '../system.mjs';
 import { home } from '../paths.mjs';
@@ -36,6 +38,12 @@ export class DockerProvider {
     const inspect = args[0] === 'inspect' || ['container', 'image', 'volume', 'network'].includes(args[0]) && args[1] === 'inspect';
     return this.command(spec, ['docker', ...args], { ...options, ...(inspect ? { errorStdout: false } : {}) });
   }
+  allocate(handle, args, options = {}) {
+    const spec = handle.spec;
+    return spec.host
+      ? allocationCommand(handle, 'ssh', [...this.sshArgs(spec), '--', spec.host, ['docker', ...args].map(quote).join(' ')], { ...options, remote: true })
+      : allocationCommand(handle, 'docker', args, options);
+  }
   prefix(spec) { return `agent-env-${spec.owner}-${spec.name}`; }
   volume(spec, service, name) { return `${this.prefix(spec)}-${service}-${name}`; }
   transfer(spec, source, destination, options = []) {
@@ -51,24 +59,32 @@ export class DockerProvider {
     // Rapid edits can keep the same size and timestamp. Compare file contents.
     await this.transfer(spec, `${spec.cwd}/`, `${workspace}/`, ['--checksum', '--delete', ...sourceExclusions.map(rule => `--exclude=${rule}`)]);
   }
-  async create(spec) {
+  async create(spec, checkpoint = async () => {}) {
     await this.docker(spec, ['info', '--format', '{{.ServerVersion}}']);
     const workspace = spec.host ? `${await this.command(spec, ['pwd'])}/.local/share/agent-env/${spec.owner}/${spec.name}` : spec.cwd;
     if (workspace.includes(',')) throw new Error('Workspace paths cannot contain commas.');
     const handle = { spec, workspace, services: {} };
-    const newVolumes = [];
-    await this.sync(handle);
     const network = this.prefix(spec);
-    await this.docker(spec, ['network', 'create', '--label', `agent-env.owner=${spec.owner}`, network]);
+    handle.services = Object.fromEntries(Object.entries(spec.services).map(([name, service]) => [name, { container: `${network}-${name}`, ...service }]));
+    await planAllocation(this, handle, [
+      { kind: 'network', name: network },
+      ...Object.entries(handle.services).flatMap(([name, service]) => [
+        { kind: 'container', name: service.container },
+        ...Object.keys(service.volumes ?? {}).map(volume => ({ kind: 'volume', name: this.volume(spec, name, volume) })),
+      ]),
+    ]);
+    await checkpoint(handle);
+    const labels = Object.entries(ownership(handle)).flatMap(([key, value]) => ['--label', `${key}=${value}`]);
     try {
+      await this.sync(handle);
+      await this.allocate(handle, ['network', 'create', ...labels, network]);
       for (const [name, service] of Object.entries(spec.services)) {
         const container = `${network}-${name}`;
-        const args = ['run', '-d', '--init', '--name', container, '--label', `agent-env.owner=${spec.owner}`, '--network', network, '--network-alias', name, '-p', `127.0.0.1::${service.containerPort}`, '--mount', `type=bind,src=${workspace},dst=/workspace`, '-w', '/workspace'];
+        const args = ['run', '-d', '--init', '--name', container, ...labels, '--network', network, '--network-alias', name, '-p', `127.0.0.1::${service.containerPort}`, '--mount', `type=bind,src=${workspace},dst=/workspace`, '-w', '/workspace'];
         for (const [volume, target] of Object.entries(service.volumes ?? {})) {
           const volumeName = this.volume(spec, name, volume);
-          const exists = await this.docker(spec, ['volume', 'ls', '-q', '--filter', `name=^${volumeName}$`]);
-          if (!exists) newVolumes.push(volumeName);
-          await this.docker(spec, ['volume', 'create', '--label', `agent-env.owner=${spec.owner}`, volumeName]);
+          await verifyAllocation(this, handle, handle.allocation.resources.filter(resource => resource.kind === 'volume' && resource.name === volumeName));
+          await this.allocate(handle, ['volume', 'create', ...labels, volumeName]);
           args.push('--mount', `type=volume,src=${this.volume(spec, name, volume)},dst=${target}`);
         }
         for (const [key, value] of Object.entries({ HOST: '0.0.0.0', PORT: String(service.containerPort), ...service.env })) args.push('-e', `${key}=${value}`);
@@ -76,17 +92,22 @@ export class DockerProvider {
         if (service.command) args.push('sh', '-lc', service.command);
         // Record the name before creation so partial failures can remove it.
         handle.services[name] = { container, ...service };
-        await this.docker(spec, args);
+        await this.allocate(handle, args);
       }
       await this.wait(handle);
       return handle;
     } catch (error) {
-      await this.remove(handle).catch(() => {});
-      for (const volume of newVolumes) await this.docker(spec, ['volume', 'rm', volume]).catch(() => {});
+      try {
+        await removeAllocation(this, handle, { purge: true, failed: true });
+        if (spec.host && workspace.endsWith(`/.local/share/agent-env/${spec.owner}/${spec.name}`)) await this.command(spec, ['rm', '-rf', '--', workspace]);
+        error.cleanupComplete = true;
+      }
+      catch (cleanup) { error.message += ` Cleanup failed: ${cleanup.message}`; }
       throw error;
     }
   }
   async wait(handle, deadline = Date.now() + (handle.spec.startupTimeoutSeconds ?? 60) * 1000) {
+    if (handle.allocation) await verifyAllocation(this, handle);
     const seconds = handle.spec.startupTimeoutSeconds ?? 60;
     for (const [name, service] of Object.entries(handle.services)) {
       while (true) {
@@ -138,18 +159,29 @@ export class DockerProvider {
       return connections;
     } catch (error) { for (const connection of connections) connection.close(); throw error; }
   }
+  async recover(handle, checkpoint) {
+    await removeAllocation(this, handle, { computeOnly: true });
+    return this.create(handle.spec, checkpoint);
+  }
   async start(handle) {
+    if (handle.allocation) await verifyAllocation(this, handle);
     await this.sync(handle);
     for (const service of Object.values(handle.services)) await this.docker(handle.spec, ['start', service.container]);
     await this.wait(handle);
   }
   async stop(handle) {
+    if (handle.allocation) await verifyAllocation(this, handle);
     await Promise.all(Object.values(handle.services).map(service => this.docker(handle.spec, ['stop', '-t', '5', service.container])));
   }
   async remove(handle, purge = false) {
+    if (handle.allocation) {
+      await removeAllocation(this, handle, { purge });
+      if (handle.spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${handle.spec.owner}/${handle.spec.name}`)) await this.command(handle.spec, ['rm', '-rf', '--', handle.workspace]);
+      return;
+    }
     for (const service of Object.values(handle.services)) {
       const exists = await this.docker(handle.spec, ['container', 'ls', '-aq', '--filter', `name=^/${service.container}$`]);
-      if (exists) await this.docker(handle.spec, ['rm', '-f', service.container]);
+      if (exists) await this.docker(handle.spec, ['rm', purge ? '-fv' : '-f', service.container]);
     }
     const network = this.prefix(handle.spec);
     const networkExists = await this.docker(handle.spec, ['network', 'ls', '-q', '--filter', `name=^${network}$`]);

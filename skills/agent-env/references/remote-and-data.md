@@ -6,6 +6,19 @@ This skill does not authorize paid infrastructure, trust changes, or data deleti
 
 ## Existing SSH hosts
 
+For interrupted Docker or Compose startup, inspect `agent-env --json list` first.
+If it reports `recovery: "required"`, use `agent-env up NAME` to recover the saved instance.
+Use `agent-env rm NAME --purge` only when the user intends to delete its owned resources and data.
+Keep the private state directory until recovery or purge succeeds.
+Wait for active allocation commands before retrying. Missing completion receipts block automatic recovery.
+Preserve the records for inspection when completion is uncertain.
+Verify that all allocation commands have stopped on both the local and remote host.
+Then use `agent-env rm NAME --accept-uncertain` to remove compute and retain volumes.
+Add `--purge` only when the user intends to delete retained data.
+This option still refuses active local process groups and foreign resources. It cannot prove that a remote command stopped.
+Do not delete recovery records manually.
+Complete recovery before snapshots or forks. Do not remove resources that fail ownership verification.
+
 The local machine needs SSH and rsync.
 Native SSH mode does not require local Docker, so a Swarm worker can use a separate Docker host.
 Compose also requires a local Docker CLI and Compose plugin to resolve configuration. It does not require a local Docker engine.
@@ -118,7 +131,37 @@ It verifies archive checksums and refuses existing destination volumes.
 Snapshots contain volume data, not source files or a complete deployable project.
 Unsupported or shared mounts cause an error. Do not add `--omit-mounts` unless the user accepts the missing data.
 
-S3 uses the installed AWS CLI and its configured credentials:
+Configure storage once with AWS CLI v2 and its normal credential chain:
+
+```sh
+agent-env storage add backup --provider s3 --bucket my-bucket --region eu-west-1 --aws-profile work
+agent-env storage check backup
+agent-env storage list
+agent-env snapshot app storage://backup/checkpoint
+agent-env restore storage://backup/checkpoint --name restored
+```
+
+Use `--project` with profile additions or removals to modify `storage` in `agent-env.json`.
+Otherwise, profiles reside in the private `$AGENT_ENV_HOME/storage.json` file.
+A project profile replaces the complete user profile. Credentials and endpoints never merge.
+Profile edits do not change runtime identity.
+Use `--access-key-env VAR`, `--secret-key-env VAR`, and optional `--session-token-env VAR` for credential references.
+These flags accept variable names, never credential values.
+`--endpoint`, `--region`, `--prefix`, `--addressing-style auto|path|virtual`, and `--ca-bundle` configure compatible services.
+Local profiles use `--provider local --root /existing/backups`.
+`storage list` reports the effective source without credential references or values.
+`storage remove NAME` removes configuration only. It never deletes archives.
+
+Named S3 exports check bucket access, upload, download, and actual duplicate conditional rejection before volume export.
+A backend that ignores conditional writes fails this check.
+Keep recovery object paths if probe cleanup fails.
+The invoking CLI resolves credentials. The daemon does not reuse its startup AWS environment.
+AWS CLI v2 must support `configure export-credentials --format process` and `put-object --if-none-match`.
+Live vendor compatibility requires a successful check and restore against that backend.
+The bundled CI fixture verifies SeaweedFS, without paid cloud services.
+See [backend commands and requirements](https://github.com/desplega-ai/agent-env/blob/master/docs/storage.md).
+
+Legacy locations remain available:
 
 ```sh
 agent-env snapshot app s3://my-bucket/checkpoint

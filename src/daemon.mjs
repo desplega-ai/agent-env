@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { readFile, writeFile, rename, mkdir, chmod, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, mkdir, chmod, mkdtemp, rm } from 'node:fs/promises';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { snapshotInstance, restoreSnapshot, disposeRestoredVolumes } from './snapshots.mjs';
@@ -15,6 +15,8 @@ import { createProxy, createTcpProxy } from './proxy.mjs';
 import { cloudPeers, cloudCanSleep, maintainInstances, expireCloudMachine } from './maintenance.mjs';
 import { checkLocalRuntime } from './prerequisites.mjs';
 import { projectCommand } from './commands.mjs';
+import { durableJson } from './allocation-command.mjs';
+import { acceptUncertainAllocation } from './providers/recovery.mjs';
 
 await mkdir(home, { recursive: true, mode: 0o700 });
 await chmod(home, 0o700);
@@ -50,8 +52,7 @@ const extras = new RuntimeExtras({
   },
 });
 async function save() {
-  await writeFile(`${statePath}.tmp`, JSON.stringify(state, null, 2), { mode: 0o600 });
-  await rename(`${statePath}.tmp`, statePath);
+  await durableJson(statePath, state);
 }
 async function reserve(spec) {
   for (const service of Object.values(spec.services)) {
@@ -130,7 +131,8 @@ function summary(handle) {
     environment: handle.spec.environment ?? handle.spec.environmentName,
     sync: handle.spec.host || handle.spec.provider === 'e2b' ? handle.syncError ?? (handle.spec.watch === false ? 'manual' : 'watching') : 'local files',
     cloud: handle.spec.cloud ? { serverId: handle.spec.cloud.serverId, expiresAt: handle.spec.cloud.expiresAt, sleeping: !!handle.sleeping } : undefined,
-    error: redact(handle, errors.get(name)),
+    recovery: handle.pending ? 'required' : undefined,
+    error: redact(handle, errors.get(name) ?? (handle.pending ? `Startup interrupted. Run agent-env up ${name} to recover or agent-env rm ${name} --purge to remove owned resources.` : undefined)),
     services: Object.fromEntries(Object.entries(handle.services).map(([key, service]) => [key, {
       internal: !!service.internal,
       port: service.port, protocol: service.protocol,
@@ -155,10 +157,11 @@ async function sleepUnusedCloud(handle) {
   await save();
 }
 function storageOptions(message) {
-  return { endpointUrl: message.endpoint, awsEnv: message.awsEnv, omitUnsupportedMounts: !!message.omitMounts };
+  return { endpointUrl: message.endpoint, region: message.region, awsEnv: message.awsEnv, awsConfig: message.awsConfig, omitUnsupportedMounts: !!message.omitMounts };
 }
 async function action(message) {
   const { name, type } = message;
+  if (message.acceptUncertain && (type !== 'rm' || !name || message.all)) throw new Error('Use --accept-uncertain only with rm and one explicit instance name.');
   if (type === 'resume') {
     const spec = structuredClone(instance(name).spec);
     if (message.startupTimeoutSeconds !== undefined) spec.startupTimeoutSeconds = message.startupTimeoutSeconds;
@@ -176,6 +179,7 @@ async function action(message) {
     const provider = providerFor(spec);
     await checkLocalRuntime(spec);
     let handle = Object.hasOwn(state.instances, spec.name) ? state.instances[spec.name] : undefined;
+    const previousHandle = handle;
     if (type === 'restore' && handle) throw new Error('Restore requires a new instance name.');
     if (type === 'restore' && !provider.docker) throw new Error('This provider does not support volume snapshots.');
     let restored;
@@ -183,6 +187,7 @@ async function action(message) {
       const copy = structuredClone(value);
       delete copy.startupTimeoutSeconds;
       delete copy.commands;
+      delete copy.storage;
       if (omitEnvironment) {
         delete copy.env; delete copy.envFiles; delete copy.envFile; delete copy.sensitiveValues;
         for (const service of Object.values(copy.services ?? {})) delete service.env;
@@ -203,6 +208,13 @@ async function action(message) {
     if (changed && (!canRecreate || !isDeepStrictEqual(identitySpec(handle.spec, true), identitySpec(spec, true)))) {
       throw new Error(`Configuration changed for ${spec.name}. Run agent-env rm ${spec.name}, then up. Data remains.`);
     }
+    const checkpoint = async pending => {
+      pending.pending = true;
+      pending.running = false;
+      if (handle?.worktree) pending.worktree = handle.worktree;
+      state.instances[spec.name] = pending;
+      await save();
+    };
     try {
       await reserve(spec);
       if (spec.cloud) {
@@ -219,11 +231,16 @@ async function action(message) {
         await disconnect(spec.name);
         await provider.remove(handle, false);
         handle.removed = true;
+        delete handle.pending;
         handle.running = false;
         handle.spec = spec;
         await save();
       }
-      if (handle && !handle.removed) {
+      if (handle?.pending) {
+        handle.spec = spec;
+        handle = await provider.recover(handle, checkpoint);
+        state.instances[spec.name] = handle;
+      } else if (handle && !handle.removed) {
         // Keep the public listeners while replacing only this instance's tunnels.
         for (const connection of connections.get(spec.name) ?? []) connection.close();
         connections.delete(spec.name);
@@ -232,7 +249,7 @@ async function action(message) {
       } else {
         if (type === 'restore') restored = await restoreSnapshot(spec, message.location, provider, storageOptions(message));
         const worktree = handle?.worktree;
-        handle = await provider.create(spec);
+        handle = await provider.create(spec, type === 'up' && ['docker', 'compose'].includes(spec.provider) ? checkpoint : undefined);
         if (worktree) handle.worktree = worktree;
         state.instances[spec.name] = handle;
       }
@@ -241,12 +258,24 @@ async function action(message) {
       handle.sleeping = false;
       activity(handle.spec.name);
       await connect(handle);
+      delete handle.pending;
       await save();
       if (spec.cloud) { handle.spec.cloud = await commitCloud(handle); await save(); }
       return { ...summary(handle), ...(restored ? { omittedMounts: restored.manifest.omittedMounts } : {}) };
     } catch (error) {
       errors.set(spec.name, error.message);
+      const pending = state.instances[spec.name];
+      if (pending?.pending && error.cleanupComplete) {
+        if (previousHandle) {
+          previousHandle.allocation = pending.allocation;
+          state.instances[spec.name] = previousHandle;
+        }
+        else delete state.instances[spec.name];
+        if (handle === pending) handle = previousHandle;
+        await save();
+      } else if (!handle && pending?.pending) handle = pending;
       if (handle) {
+        if (['ALLOCATION_RUNNING', 'ALLOCATION_UNCERTAIN'].includes(error.code)) handle.pending = true;
         await provider.stop(handle).catch(() => {});
         handle.running = false;
         await disconnect(spec.name);
@@ -263,7 +292,7 @@ async function action(message) {
     }
   }
   if (type === 'list') {
-    return Promise.all(Object.values(state.instances).map(async handle => ({ ...summary(handle), status: handle.removed ? Object.fromEntries(Object.keys(handle.services).map(key => [key, 'data retained'])) : handle.sleeping ? Object.fromEntries(Object.keys(handle.services).map(key => [key, 'sleeping'])) : await providerFor(handle.spec).status(handle) })));
+    return Promise.all(Object.values(state.instances).map(async handle => ({ ...summary(handle), status: handle.pending ? Object.fromEntries(Object.keys(handle.services).map(key => [key, 'recovery required'])) : handle.removed ? Object.fromEntries(Object.keys(handle.services).map(key => [key, 'data retained'])) : handle.sleeping ? Object.fromEntries(Object.keys(handle.services).map(key => [key, 'sleeping'])) : await providerFor(handle.spec).status(handle) })));
   }
   if (type === 'use') {
     const handle = instance(name);
@@ -296,6 +325,13 @@ async function action(message) {
       if (state.instances[handle.spec.name] !== handle) continue;
       const provider = providerFor(handle.spec);
       const cloud = handle.spec.cloud;
+      if (message.acceptUncertain) {
+        if (!handle.allocation || !['docker', 'compose'].includes(handle.spec.provider)) throw new Error('This instance has no Docker or Compose allocation record to acknowledge.');
+        await acceptUncertainAllocation(provider, handle);
+        handle.pending = true;
+        handle.running = false;
+        await save();
+      }
       const peers = () => cloudPeers(handle, state.instances).filter(other => other !== handle);
       if (type === 'rm' && message.removeWorktree && handle.worktree) await removeOwnedWorktree(handle.worktree, { checkOnly: true, dirty: message.discardWorktree ? 'discard' : undefined });
       if (type === 'rm' && message.purge && cloud?.expiresAt && Date.parse(cloud.expiresAt) <= Date.now()) {
@@ -336,6 +372,7 @@ async function action(message) {
   }
   if (type === 'snapshot') {
     const source = instance(name);
+    if (source.pending) throw new Error(`Recover interrupted startup with agent-env up ${name} before taking a snapshot.`);
     if (source.running || source.removed) throw new Error('Stop the source containers before a snapshot. Removed containers cannot identify their volumes.');
     const provider = providerFor(source.spec);
     if (!provider.docker) throw new Error('This provider does not support volume snapshots.');
@@ -347,6 +384,7 @@ async function action(message) {
   }
   if (type === 'fork') {
     const source = instance(name);
+    if (source.pending) throw new Error(`Recover interrupted startup with agent-env up ${name} before creating a fork.`);
     if (['e2b', 'devcontainer'].includes(source.spec.provider)) throw new Error(`Provider ${source.spec.provider} does not support forks.`);
     const destination = validName(message.destination);
     if (Object.hasOwn(state.instances, destination)) throw new Error('The destination instance already exists.');
@@ -485,9 +523,13 @@ await chmod(socketPath, 0o600);
 queue = (async () => {
   const preferred = { ...state.focus };
   for (const handle of Object.values(state.instances)) {
+    if (handle.pending) { handle.running = false; continue; }
     if (!handle.running) continue;
     try { await providerFor(handle.spec).wait(handle); await connect(handle); activity(handle.spec.name); }
-    catch (error) { errors.set(handle.spec.name, error.message); await releaseEmpty(); }
+    catch (error) {
+      if (['ALLOCATION_RUNNING', 'ALLOCATION_UNCERTAIN'].includes(error.code)) { handle.pending = true; handle.running = false; }
+      errors.set(handle.spec.name, error.message); await releaseEmpty();
+    }
   }
   for (const [port, route] of routes) {
     if (route.targets.has(preferred[port])) route.selected = preferred[port];
