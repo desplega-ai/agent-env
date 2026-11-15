@@ -27,8 +27,10 @@ export function resolveE2BSpec(spec) {
   if (!isAbsolute(spec.cwd ?? '') || !validName(spec.name)) throw new Error('E2B requires an absolute checkout path and a valid instance name.');
   if (!object(spec.e2b ?? {})) throw new Error('Set e2b to an object.');
   for (const key of Object.keys(spec.e2b ?? {})) {
-    if (!['template', 'timeoutSeconds', 'credentials'].includes(key)) throw new Error('E2B supports template and timeoutSeconds options only.');
+    if (!['template', 'timeoutSeconds', 'exclude', 'credentials'].includes(key)) throw new Error('E2B supports template, timeoutSeconds, and exclude options only.');
   }
+  const exclude = spec.e2b?.exclude ?? [];
+  if (!Array.isArray(exclude) || exclude.some(rule => typeof rule !== 'string' || !rule.replace(/^\//, '') || rule.includes('\0'))) throw new Error('Set e2b.exclude to an array of nonempty path rules.');
   const template = spec.e2b?.template ?? 'base';
   const timeoutSeconds = spec.e2b?.timeoutSeconds ?? 300;
   if (typeof template !== 'string' || !template.trim() || /[\s\0]/.test(template)) throw new Error('Set a valid E2B template name or ID.');
@@ -65,7 +67,7 @@ export function resolveE2BSpec(spec) {
     ports.add(service.port); internalPorts.add(containerPort);
     return [name, { ...service, containerPort, protocol, env: { ...env, ...cleanEnv(service.env) } }];
   }));
-  return { ...spec, env, services, e2b: { template, timeoutSeconds, credentials: { apiKey } },
+  return { ...spec, env, services, e2b: { template, timeoutSeconds, exclude, credentials: { apiKey } },
     sensitiveValues: [...new Set([...sensitiveValuesForSpec(spec), apiKey])] };
 }
 
@@ -536,7 +538,7 @@ export class E2BProvider {
     const visit = async (directory, prefix = '') => {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
         const path = prefix ? `${prefix}/${entry.name}` : entry.name;
-        if (!shouldSync(path) || credentialPath(path) || excludedFiles.has(path)) continue;
+        if (!shouldSync(path, handle.spec.e2b.exclude) || credentialPath(path) || excludedFiles.has(path)) continue;
         const filename = join(directory, entry.name);
         if (entry.isDirectory()) { await visit(filename, path); continue; }
         if (!entry.isFile()) continue;

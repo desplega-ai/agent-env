@@ -67,6 +67,7 @@ export class RuntimeExtras {
     try {
       this.watchers.set(name, watchSource(handle.spec.cwd, {
         stateDirectory: home,
+        exclusions: handle.spec.e2b?.exclude,
         changed: () => this.changed(name),
         error: error => { handle.syncError = error.message; },
       }));

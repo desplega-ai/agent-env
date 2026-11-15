@@ -103,6 +103,13 @@ try {
   assert.match(publicKey.stderr, /Do not put E2B credentials/);
   assert.ok(!(publicKey.stdout + publicKey.stderr).includes('fixture-key-never-use'));
   await assert.rejects(stat(e2bState), { code: 'ENOENT' });
+  for (const exclude of ['public', [''], ['/'], [3]]) {
+    await writeFile(join(e2b, 'agent-env.json'), JSON.stringify({ provider: 'e2b', e2b: { exclude }, services: { web: { command: 'node server.js', port: 3010 } } }));
+    const invalid = await createCli(e2b, e2bState, { E2B_API_KEY: 'fixture-key-never-use' }).invoke(['up'], false);
+    assert.notEqual(invalid.code, 0);
+    assert.match(invalid.stderr, /e2b\.exclude/);
+    await assert.rejects(stat(e2bState), { code: 'ENOENT' });
+  }
   for (const commands of [{ invalid: [] }, { install: { command: ['echo'], service: 'missing' } }, { install: { command: 'echo ok', unknown: true } }]) {
     await writeFile(join(explicit, 'agent-env.json'), JSON.stringify({ services: { web: { image: 'busybox:1.37', port: 8123 } }, commands }));
     await fails(['up', '--name', 'invalid-command'], /command/i, { cwd: explicit });

@@ -150,9 +150,27 @@ volumes:
   const failure = await invoke(['up', '--name', 'failure', '--compose-file', 'failure.yaml', ...options], false);
   assert.notEqual(failure.code, 0);
   assert.ok(!(failure.stdout + failure.stderr).includes('compose-private-$-literal'));
+  // Cleanup removes the containers, so the error itself must carry their state and output.
+  assert.match(failure.stderr, /worker: exited \(9\)/);
+  assert.match(failure.stderr, /deliberate-compose-failure/);
+  assert.match(failure.stderr, /\[redacted\]/);
   assert.equal(await docker(['volume', 'ls', '-q', '--filter', `label=agent-env.e2e.failure=${token}`]), '');
   assert.ok((await containers()).every(info => !info.Config.Labels['com.docker.compose.project'].endsWith('-failure')));
   assert.equal(await docker(['network', 'ls', '-q', '--filter', `label=agent-env.owner=${owner}`, '--filter', 'name=-failure']), '');
+
+  // A health check that cannot run must name its own error, not only the timeout.
+  await writeFile(join(cwd, 'unhealthy.yaml'), `services:
+  worker:
+    image: busybox:1.37
+    labels: {agent-env.e2e: "${token}"}
+    command: [sleep, "3600"]
+    healthcheck: {test: [CMD, missing-health-tool], interval: 1s, timeout: 2s, retries: 1}
+`);
+  const unhealthy = await invoke(['up', '--name', 'unhealthy', '--compose-file', 'unhealthy.yaml', '--timeout', '30', ...options], false);
+  assert.notEqual(unhealthy.code, 0);
+  assert.match(unhealthy.stderr, /worker: running, unhealthy/);
+  assert.match(unhealthy.stderr, /health check: .*missing-health-tool/);
+  assert.ok((await containers()).every(info => !info.Config.Labels['com.docker.compose.project'].endsWith('-unhealthy')));
 
   // A later failed start must retain data from the earlier successful stack.
   await writeFile(join(cwd, 'retained.yaml'), `services:

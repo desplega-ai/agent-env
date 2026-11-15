@@ -239,8 +239,25 @@ export class ComposeProvider extends DockerProvider {
         ...(handle.spec.compose.profiles ?? []).flatMap(profile => ['--profile', profile]), ...args], { env: { ...composeEnvironment({}), COMPOSE_DISABLE_ENV_FILE: '1' } });
     } catch (error) {
       if (['ALLOCATION_RUNNING', 'ALLOCATION_UNCERTAIN'].includes(error.code)) throw error;
-      throw Object.assign(new Error(`Compose ${args[0]} failed. Check service status and redacted logs.`), { exitCode: error.exitCode ?? 1 });
+      // The last lines of Compose output name the failed pull, build step, or unhealthy service.
+      const detail = redactEnvironment(String(error.message), sensitiveValuesForSpec(handle.spec)).trimEnd().split('\n').slice(-8).join('\n');
+      throw Object.assign(new Error(`Compose ${args[0]} failed. Check service status and redacted logs.\n${detail}`), { exitCode: error.exitCode ?? 1 });
     }
+  }
+  // Failed-start cleanup removes the containers, so read their state, health checks, and logs first.
+  async diagnose(handle) {
+    const lines = [];
+    const ids = (await this.docker(handle.spec, ['ps', '-aq', '--filter', `label=com.docker.compose.project=${handle.project}`])).split(/\s+/).filter(Boolean);
+    for (const id of ids) {
+      const [info] = JSON.parse(await this.docker(handle.spec, ['inspect', id]));
+      const { Status: status, ExitCode: code, Health: health } = info.State;
+      lines.push(`${info.Config.Labels?.['com.docker.compose.service'] ?? id}: ${status}${status === 'exited' ? ` (${code})` : ''}${health ? `, ${health.Status}` : ''}`);
+      const probe = health?.Log?.at(-1)?.Output?.trim();
+      if (probe) lines.push(`  health check: ${probe.split('\n').slice(-3).join(' ').slice(0, 300)}`);
+      const logs = await this.docker(handle.spec, ['logs', '--tail', '10', id], { combined: true }).catch(() => '');
+      lines.push(...logs.split('\n').filter(Boolean).map(line => `  ${line.slice(0, 300)}`));
+    }
+    return this.redact(handle, lines.join('\n'));
   }
   async prepare(spec, workspace, directory, labels = { 'agent-env.owner': spec.owner, 'agent-env.instance': spec.name }) {
     const model = structuredClone(spec.compose.model ?? await parseCompose(spec));
@@ -385,6 +402,8 @@ export class ComposeProvider extends DockerProvider {
       return handle;
     } catch (error) {
       if (attempted) {
+        const state = await this.diagnose(handle).catch(() => '');
+        if (state) error.message += `\nService state before cleanup:\n${state}`;
         try {
           await removeAllocation(this, handle, { purge: true, failed: true });
           if (spec.host && handle.workspace.endsWith(`/.local/share/agent-env/${spec.owner}/${spec.name}`)) await this.command(spec, ['rm', '-rf', '--', handle.workspace]);

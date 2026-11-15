@@ -38,7 +38,8 @@ The provider does not synchronize local `node_modules`.
   "name": "sandbox-app",
   "e2b": {
     "template": "base",
-    "timeoutSeconds": 300
+    "timeoutSeconds": 300,
+    "exclude": ["public/images", "public/videos", "qa-screenshots"]
   },
   "services": {
     "web": {
@@ -56,6 +57,7 @@ The provider does not synchronize local `node_modules`.
 
 `template` defaults to `base`.
 `timeoutSeconds` defaults to 300 and accepts integers from 1 through 86400.
+`exclude` adds path rules to the default sync exclusions. It defaults to an empty list.
 E2B account limits can impose a lower maximum.
 The provider requests automatic pause at timeout, without automatic resume from network traffic.
 Run `agent-env up` to resume an expired sandbox.
@@ -174,6 +176,12 @@ It preserves executable permission bits.
 This simple implementation buffers the payload in memory.
 Large checkouts can therefore require substantial client and sandbox memory.
 Build-directory exclusions apply at the checkout root. Nested generated directories can still transfer.
+Add `e2b.exclude` rules to skip tracked files that services do not need, such as media or screenshots.
+A rule with a leading slash matches a path from the checkout root, such as `/docs`.
+A rule with a slash elsewhere matches that path from the root, such as `public/videos`.
+A rule without a slash matches that name at any depth, such as `fixtures`.
+A rule ending in `*` matches any name that starts with the prefix, such as `qa-*`.
+The watcher ignores edits to excluded paths. Sync removes previously transferred files that a new rule excludes.
 Concurrent source edits can require another sync.
 Generated dependencies remain inside the sandbox between syncs.
 
