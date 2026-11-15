@@ -246,18 +246,24 @@ export class ComposeProvider extends DockerProvider {
   }
   // Failed-start cleanup removes the containers, so read their state, health checks, and logs first.
   async diagnose(handle) {
+    const values = JSON.parse(await readFile(join(handle.runtimeDirectory, 'redactions.json'), 'utf8'));
+    // `--tail` can cut a multi-line value, so each of its lines is also redacted alone.
+    // shortcut: lines under 16 characters (a short base64 tail) stay visible, redact them too if a value format needs it.
+    const fragments = values.flatMap(value => value.includes('\n') ? value.split('\n').map(line => line.trim()).filter(line => line.length >= 16) : []);
+    // Redact raw output before any cut or indent, or a cut secret keeps its prefix and an indented one stops matching.
+    const redact = output => redactEnvironment(String(output ?? ''), [...values, ...fragments]);
     const lines = [];
     const ids = (await this.docker(handle.spec, ['ps', '-aq', '--filter', `label=com.docker.compose.project=${handle.project}`])).split(/\s+/).filter(Boolean);
     for (const id of ids) {
       const [info] = JSON.parse(await this.docker(handle.spec, ['inspect', id]));
       const { Status: status, ExitCode: code, Health: health } = info.State;
-      lines.push(`${info.Config.Labels?.['com.docker.compose.service'] ?? id}: ${status}${status === 'exited' ? ` (${code})` : ''}${health ? `, ${health.Status}` : ''}`);
-      const probe = health?.Log?.at(-1)?.Output?.trim();
+      lines.push(redact(`${info.Config.Labels?.['com.docker.compose.service'] ?? id}: ${status}${status === 'exited' ? ` (${code})` : ''}${health ? `, ${health.Status}` : ''}`));
+      const probe = redact(health?.Log?.at(-1)?.Output).trim();
       if (probe) lines.push(`  health check: ${probe.split('\n').slice(-3).join(' ').slice(0, 300)}`);
       const logs = await this.docker(handle.spec, ['logs', '--tail', '10', id], { combined: true }).catch(() => '');
-      lines.push(...logs.split('\n').filter(Boolean).map(line => `  ${line.slice(0, 300)}`));
+      lines.push(...redact(logs).split('\n').filter(Boolean).map(line => `  ${line.slice(0, 300)}`));
     }
-    return this.redact(handle, lines.join('\n'));
+    return lines.join('\n');
   }
   async prepare(spec, workspace, directory, labels = { 'agent-env.owner': spec.owner, 'agent-env.instance': spec.name }) {
     const model = structuredClone(spec.compose.model ?? await parseCompose(spec));
