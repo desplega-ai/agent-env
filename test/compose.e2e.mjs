@@ -139,20 +139,50 @@ configs:
   worker:
     image: busybox:1.37
     labels: {agent-env.e2e: "${token}"}
-    command: [sh, -c, "printenv POSTGRES_PASSWORD; echo deliberate-compose-failure; exit 9"]
+    command: [sh, -c, "cat /run/secrets/failure_key; printf '%280s' '' | tr ' ' x; printenv POSTGRES_PASSWORD; echo deliberate-compose-failure; exit 9"]
     environment:
       POSTGRES_PASSWORD: \${POSTGRES_PASSWORD}
+    secrets: [failure_key]
     volumes: ["data:/data"]
 volumes:
   data:
     labels: {agent-env.e2e.failure: "${token}"}
+secrets:
+  failure_key:
+    file: .env.failure key
 `);
+  // A multi-line secret longer than the log tail, then a secret that straddles the 300-character line cut.
+  await writeFile(join(cwd, '.env.failure key'), `${Array.from({ length: 10 }, (_, line) => `failure-key-line-${line}`.padEnd(40, 'k')).join('\n')}\n`);
   const failure = await invoke(['up', '--name', 'failure', '--compose-file', 'failure.yaml', ...options], false);
   assert.notEqual(failure.code, 0);
-  assert.ok(!(failure.stdout + failure.stderr).includes('compose-private-$-literal'));
+  assert.ok(!(failure.stdout + failure.stderr).includes('compose-private'));
+  assert.ok(!(failure.stdout + failure.stderr).includes('failure-key-line'));
+  // Cleanup removes the containers, so the error itself must carry their state and output.
+  assert.match(failure.stderr, /worker: exited \(9\)/);
+  assert.match(failure.stderr, /deliberate-compose-failure/);
+  assert.match(failure.stderr, /\[redacted\]/);
   assert.equal(await docker(['volume', 'ls', '-q', '--filter', `label=agent-env.e2e.failure=${token}`]), '');
   assert.ok((await containers()).every(info => !info.Config.Labels['com.docker.compose.project'].endsWith('-failure')));
   assert.equal(await docker(['network', 'ls', '-q', '--filter', `label=agent-env.owner=${owner}`, '--filter', 'name=-failure']), '');
+
+  // A health check that cannot run must name its own error, not only the timeout.
+  await writeFile(join(cwd, 'unhealthy.yaml'), `services:
+  worker:
+    image: busybox:1.37
+    labels: {agent-env.e2e: "${token}"}
+    command: [sleep, "3600"]
+    secrets: [failure_key]
+    healthcheck: {test: [CMD-SHELL, "cat /run/secrets/failure_key; missing-health-tool"], interval: 1s, timeout: 2s, retries: 1}
+secrets:
+  failure_key:
+    file: .env.failure key
+`);
+  const unhealthy = await invoke(['up', '--name', 'unhealthy', '--compose-file', 'unhealthy.yaml', '--timeout', '30', ...options], false);
+  assert.notEqual(unhealthy.code, 0);
+  assert.match(unhealthy.stderr, /worker: running, unhealthy/);
+  assert.match(unhealthy.stderr, /health check: .*missing-health-tool/);
+  assert.ok(!(unhealthy.stdout + unhealthy.stderr).includes('failure-key-line'));
+  assert.ok((await containers()).every(info => !info.Config.Labels['com.docker.compose.project'].endsWith('-unhealthy')));
 
   // A later failed start must retain data from the earlier successful stack.
   await writeFile(join(cwd, 'retained.yaml'), `services:
